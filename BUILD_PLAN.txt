@@ -1,0 +1,82 @@
+Boss Assistant Build Plan
+
+Goal
+Build a personal AI assistant on macOS that uses OpenAI cloud models through the OpenAI Agents Python SDK.
+
+Architecture
+User Input
+  -> General Agent (cloud gpt-5.4-mini)
+    -> Mac Agent (cloud gpt-5.4-mini + tools + MCP)
+    -> Research Agent (cloud gpt-5.4 + web search)
+    -> Reasoning Agent (cloud gpt-5.4)
+    -> Code Agent (cloud gpt-5.4)
+  -> Output + Memory Persistence
+
+Phases
+Phase 0
+- Install Homebrew if needed
+- Install Python 3.12+
+- Install Node.js
+- Create virtual environment
+- Install Python packages
+
+Phase 1
+- Implement config-driven cloud model provider
+- Define agents and handoffs
+- Add a basic CLI runner
+
+Phase 2
+- Add native macOS function tools
+- Register tools with the Mac agent
+
+Phase 3
+- Add MCP server definitions
+- Attach MCP servers to agents
+- Add hosted web search to research agent
+
+Phase 4
+- Add input guardrails for dangerous requests
+
+Phase 5
+- Add conversation persistence across restarts
+
+Phase 6
+- Polish the CLI with streaming and rich output
+
+Project Structure
+/Users/tj/boss/
+  pyproject.toml
+  BUILD_PLAN.txt
+  boss/
+    __init__.py
+    config.py
+    main.py
+    models.py
+    agents.py
+    tools/
+      __init__.py
+      mac.py
+    mcp/
+      __init__.py
+      servers.py
+    guardrails/
+      __init__.py
+      safety.py
+    persistence/
+      __init__.py
+      history.py
+
+Build Order
+1. Get Phase 1 working end to end with cloud routing.
+2. Add Mac tools and test them individually.
+3. Add MCP servers and test Apple integration.
+4. Add safety guardrails.
+5. Add persistence.
+6. Improve CLI experience with streaming.
+
+Verification Targets
+- Basic Q and A routes through the general entry agent.
+- Complex reasoning routes to the cloud reasoning agent.
+- Mac requests call macOS tools.
+- Dangerous requests are blocked.
+- Session history persists across restarts.
