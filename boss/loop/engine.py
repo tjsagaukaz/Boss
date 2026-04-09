@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Any, AsyncIterator
@@ -76,6 +77,17 @@ def _build_iteration_prompt(
             if attempt.assistant_output:
                 tail = _clip(attempt.assistant_output, 1500)
                 parts.append(f"Assistant output (tail):\n{tail}")
+            # Include preview verification results for visual context
+            if attempt.verification_method and attempt.verification_method != "skipped":
+                parts.append(f"Preview verification: {attempt.verification_method}")
+                if attempt.preview_evidence:
+                    ev = attempt.preview_evidence
+                    if ev.get("page_title"):
+                        parts.append(f"  Page title: {ev['page_title']}")
+                    if ev.get("console_errors"):
+                        parts.append(f"  Console errors: {ev['console_errors']}")
+                    if ev.get("network_errors"):
+                        parts.append(f"  Network errors: {ev['network_errors']}")
 
     if attempt_number == 1:
         parts.append(
@@ -140,6 +152,7 @@ class LoopEngine:
         self._mode = mode
         self._workspace_root = workspace_root
         self._job_id = job_id
+        self._pending_preview_content: list[dict] | None = None
 
         if resume_state:
             self._state = resume_state
@@ -224,7 +237,9 @@ class LoopEngine:
             test_output = ""
 
             try:
-                async for chunk in self._run_agent_iteration(prompt):
+                async for chunk in self._run_agent_iteration(
+                    prompt, preview_content=self._pending_preview_content,
+                ):
                     payload = _try_parse_sse(chunk)
 
                     if payload is not None:
@@ -310,6 +325,9 @@ class LoopEngine:
             if permission_blocked:
                 return
 
+            # Clear preview content — consumed by this iteration
+            self._pending_preview_content = None
+
             # Finalize attempt
             attempt.finished_at = time.time()
             attempt.commands = commands_this_attempt
@@ -321,6 +339,36 @@ class LoopEngine:
 
             if result == "success":
                 attempt.test_passed = True
+
+                # Preview verification for UI/frontend tasks
+                preview_result = _try_preview_verification(
+                    task=self._task,
+                    workspace_root=self._workspace_root,
+                )
+                attempt.verification_method = preview_result["method"]
+                attempt.preview_evidence = preview_result.get("evidence")
+
+                if preview_result.get("has_blocking_errors"):
+                    # Preview found errors — don't declare success yet, retry
+                    # Store the multimodal content so the next iteration can see
+                    # the screenshot alongside the error descriptions.
+                    self._pending_preview_content = preview_result.get("model_content")
+                    attempt.test_passed = False
+                    self._state.total_test_failures += 1
+                    self._state.phase = LoopPhase.INSPECT.value
+
+                    yield _sse_event({
+                        "type": "loop_status",
+                        "loop_id": self._state.loop_id,
+                        "status": "preview_retry",
+                        "verification_method": preview_result["method"],
+                        "preview_errors": preview_result.get("error_summary", ""),
+                        "attempt": self._state.current_attempt,
+                    })
+
+                    save_loop_state(self._state)
+                    continue
+
                 self._state.stop_reason = StopReason.SUCCESS.value
                 self._state.finished_at = time.time()
                 self._state.phase = LoopPhase.DONE.value
@@ -330,6 +378,7 @@ class LoopEngine:
                     "loop_id": self._state.loop_id,
                     "status": "completed",
                     "stop_reason": StopReason.SUCCESS.value,
+                    "verification_method": preview_result["method"],
                     "attempt": self._state.current_attempt,
                 })
                 return
@@ -386,7 +435,9 @@ class LoopEngine:
             "wall_seconds": max(0.0, self._budget.max_wall_seconds - self._state.elapsed_seconds),
         }
 
-    async def _run_agent_iteration(self, prompt: str) -> AsyncIterator[str]:
+    async def _run_agent_iteration(
+        self, prompt: str, *, preview_content: list[dict] | None = None,
+    ) -> AsyncIterator[str]:
         """Run one agent pass using the existing streaming infrastructure."""
         # Import here to avoid circular imports
         from boss.api import _stream_chat_run
@@ -394,6 +445,15 @@ class LoopEngine:
 
         ctx = SessionContextManager()
         prepared = ctx.prepare_input(self._session_id, prompt)
+
+        # Inject multimodal preview content into model input when available.
+        # This appends image/text content parts from the preview verification
+        # so the model can see the screenshot alongside the text prompt.
+        if preview_content:
+            prepared.model_input.append({
+                "role": "user",
+                "content": preview_content,
+            })
 
         async for chunk in _stream_chat_run(
             run_input=prepared.model_input,
@@ -426,3 +486,131 @@ def _extract_micro_plan(text: str) -> list[str]:
         if m:
             steps.append(m.group(2).strip())
     return steps[:10]  # cap at 10 steps
+
+
+# ── Frontend task detection ─────────────────────────────────────────
+
+_FRONTEND_TASK_SIGNALS = re.compile(
+    r"\b(swiftui|swift\s+build|uikit|frontend|bossapp|chatview|contentview|"
+    r"nswindow|appkit|view\s+model|preview|ui\s+task|css|html|react|vue|"
+    r"angular|component|layout|render|display|visual)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_frontend_task(task: str) -> bool:
+    """Heuristic: does this task description suggest frontend/UI work?"""
+    return bool(_FRONTEND_TASK_SIGNALS.search(task))
+
+
+def _try_preview_verification(
+    *,
+    task: str,
+    workspace_root: str | None,
+) -> dict:
+    """Attempt preview verification if this is a UI task and tooling is available.
+
+    Returns a dict with:
+        - method: "visual" | "textual" | "skipped"
+        - evidence: dict with capture data (if available)
+        - has_blocking_errors: bool
+        - error_summary: str (if errors found)
+        - model_content: list of content parts for model input (if available)
+    """
+    if not _is_frontend_task(task):
+        return {
+            "method": "skipped",
+            "reason": "Not a frontend/UI task",
+            "has_blocking_errors": False,
+        }
+
+    try:
+        from boss.preview.session import (
+            VerificationMethod,
+            detect_preview_capabilities,
+            get_active_session,
+        )
+
+        caps = detect_preview_capabilities()
+        if not caps.can_preview:
+            return {
+                "method": VerificationMethod.SKIPPED.value,
+                "reason": "No preview tooling available",
+                "has_blocking_errors": False,
+            }
+
+        # Check for an active preview session
+        session = get_active_session(workspace_root)
+        if session is None or not session.is_running or not session.url:
+            return {
+                "method": VerificationMethod.SKIPPED.value,
+                "reason": "No active preview session with URL",
+                "has_blocking_errors": False,
+            }
+
+        # Attempt capture
+        if not caps.can_screenshot:
+            # No Playwright — can only report session status
+            return {
+                "method": VerificationMethod.TEXTUAL.value,
+                "evidence": {
+                    "session_url": session.url,
+                    "session_status": session.status.value,
+                },
+                "has_blocking_errors": False,
+            }
+
+        import time
+        from boss.config import settings
+        from boss.preview.session import capture_screenshot
+
+        captures_dir = settings.app_data_dir / "preview_captures"
+        captures_dir.mkdir(parents=True, exist_ok=True)
+        output_path = captures_dir / f"loop_verify_{int(time.time())}.png"
+
+        capture = capture_screenshot(session.url, output_path)
+
+        # Determine verification method and build model content
+        model_content: list[dict] = []
+        try:
+            from boss.preview.vision import capture_to_model_input
+            model_input = capture_to_model_input(capture)
+            method = model_input["method"]
+            model_content = model_input.get("content", [])
+        except ImportError:
+            method = VerificationMethod.TEXTUAL.value
+
+        # Write verification method back to capture and session metadata
+        capture.verification_method = method
+        session.last_capture = capture
+        session.verification_method = method
+
+        # Check for blocking errors
+        has_blocking = bool(capture.console_errors) or bool(capture.network_errors)
+        error_parts: list[str] = []
+        if capture.console_errors:
+            error_parts.append(f"{len(capture.console_errors)} console error(s)")
+        if capture.network_errors:
+            error_parts.append(f"{len(capture.network_errors)} network error(s)")
+
+        return {
+            "method": method,
+            "model_content": model_content,
+            "evidence": {
+                "screenshot_path": capture.screenshot_path,
+                "page_title": capture.page_title,
+                "console_errors": capture.console_errors[:5],
+                "network_errors": capture.network_errors[:5],
+                "dom_summary_length": len(capture.dom_summary or ""),
+            },
+            "has_blocking_errors": has_blocking,
+            "error_summary": "; ".join(error_parts) if error_parts else "",
+        }
+
+    except Exception as exc:
+        logger.warning("Preview verification failed: %s", exc)
+        return {
+            "method": "skipped",
+            "reason": f"Preview verification error: {str(exc)[:200]}",
+            "has_blocking_errors": False,
+        }

@@ -174,6 +174,28 @@ final class APIClient: Sendable {
         )
     }
 
+    func fetchProviderStatus() async throws -> ProviderRegistryInfo {
+        let data = try await get("/api/system/providers")
+        return try decode(
+            ProviderRegistryInfo.self,
+            from: data,
+            context: "/api/system/providers"
+        )
+    }
+
+    func fetchPreviewStatus(projectPath: String? = nil) async throws -> PreviewStatusInfo {
+        var items: [URLQueryItem] = []
+        if let projectPath, !projectPath.isEmpty {
+            items.append(URLQueryItem(name: "project_path", value: projectPath))
+        }
+        let data = try await get("/api/preview/status", queryItems: items)
+        return try decode(
+            PreviewStatusInfo.self,
+            from: data,
+            context: "/api/preview/status"
+        )
+    }
+
     func fetchReviewCapabilities(projectPath: String?) async throws -> ReviewCapabilitiesInfo {
         var items: [URLQueryItem] = []
         if let projectPath, !projectPath.isEmpty {
@@ -382,6 +404,111 @@ final class APIClient: Sendable {
     func triggerScan() async throws -> [String: Any] {
         let data = try await post("/api/system/scan", body: nil)
         return try decodeJSONObject(from: data, context: "/api/system/scan")
+    }
+
+    // MARK: - Workers
+
+    func fetchWorkPlans(limit: Int = 50) async throws -> [WorkPlanInfo] {
+        let data = try await get("/api/workers/plans", queryItems: [
+            URLQueryItem(name: "limit", value: "\(limit)")
+        ])
+        return try decode([WorkPlanInfo].self, from: data, context: "/api/workers/plans")
+    }
+
+    func fetchWorkPlan(planId: String) async throws -> WorkPlanInfo {
+        let data = try await get("/api/workers/plans/\(planId)")
+        return try decode(WorkPlanInfo.self, from: data, context: "/api/workers/plans/\(planId)")
+    }
+
+    func createWorkPlan(task: String, projectPath: String?, sessionId: String?, maxConcurrent: Int = 3) async throws -> WorkPlanInfo {
+        var body: [String: Any] = ["task": task, "max_concurrent": maxConcurrent]
+        if let projectPath = projectPath { body["project_path"] = projectPath }
+        if let sessionId = sessionId { body["session_id"] = sessionId }
+        let jsonData = try JSONSerialization.data(withJSONObject: body)
+        let data = try await post("/api/workers/plans", body: jsonData)
+        return try decode(WorkPlanInfo.self, from: data, context: "/api/workers/plans (create)")
+    }
+
+    func addWorkerToPlan(planId: String, role: String, scope: String, fileTargets: [String] = []) async throws -> WorkerInfo {
+        let body: [String: Any] = ["role": role, "scope": scope, "file_targets": fileTargets]
+        let jsonData = try JSONSerialization.data(withJSONObject: body)
+        let data = try await post("/api/workers/plans/\(planId)/workers", body: jsonData)
+        return try decode(WorkerInfo.self, from: data, context: "/api/workers/plans/\(planId)/workers")
+    }
+
+    func validateWorkPlan(planId: String) async throws -> ConflictValidationInfo {
+        let data = try await post("/api/workers/plans/\(planId)/validate", body: nil)
+        return try decode(ConflictValidationInfo.self, from: data, context: "/api/workers/plans/\(planId)/validate")
+    }
+
+    func markWorkPlanReady(planId: String, force: Bool = false) async throws -> [String: Any] {
+        let body: [String: Any] = ["force": force]
+        let jsonData = try JSONSerialization.data(withJSONObject: body)
+        let data = try await post("/api/workers/plans/\(planId)/ready", body: jsonData)
+        return try decodeJSONObject(from: data, context: "/api/workers/plans/\(planId)/ready")
+    }
+
+    func executeWorkPlan(planId: String) -> AsyncStream<SSEEvent> {
+        var req = URLRequest(url: URL(string: "\(baseURL)/api/workers/plans/\(planId)/execute")!)
+        req.httpMethod = "POST"
+        return stream(request: req)
+    }
+
+    func cancelWorkPlan(planId: String) async throws -> WorkPlanInfo {
+        let data = try await post("/api/workers/plans/\(planId)/cancel", body: nil)
+        return try decode(WorkPlanInfo.self, from: data, context: "/api/workers/plans/\(planId)/cancel")
+    }
+
+    func fetchWorkPlanSummary(planId: String) async throws -> WorkPlanSummaryInfo {
+        let data = try await get("/api/workers/plans/\(planId)/summary")
+        return try decode(WorkPlanSummaryInfo.self, from: data, context: "/api/workers/plans/\(planId)/summary")
+    }
+
+    // MARK: - Deploy
+
+    func fetchDeployStatus() async throws -> DeployStatusInfo {
+        let data = try await get("/api/deploy/status")
+        return try decode(DeployStatusInfo.self, from: data, context: "/api/deploy/status")
+    }
+
+    func fetchDeployments(limit: Int = 50) async throws -> [DeploymentInfo] {
+        let data = try await get("/api/deploy/deployments", queryItems: [
+            URLQueryItem(name: "limit", value: "\(limit)")
+        ])
+        return try decode([DeploymentInfo].self, from: data, context: "/api/deploy/deployments")
+    }
+
+    func fetchDeployment(deploymentId: String) async throws -> DeploymentInfo {
+        let data = try await get("/api/deploy/deployments/\(deploymentId)")
+        return try decode(DeploymentInfo.self, from: data, context: "/api/deploy/deployments/\(deploymentId)")
+    }
+
+    func createDeployment(projectPath: String, sessionId: String?, adapter: String? = nil) async throws -> DeploymentInfo {
+        var body: [String: Any] = ["project_path": projectPath, "approved": true]
+        if let sessionId { body["session_id"] = sessionId }
+        if let adapter, !adapter.isEmpty { body["adapter"] = adapter }
+        let jsonData = try JSONSerialization.data(withJSONObject: body)
+        let data = try await post("/api/deploy/deployments", body: jsonData)
+        return try decode(DeploymentInfo.self, from: data, context: "/api/deploy/deployments")
+    }
+
+    func runDeployment(deploymentId: String) async throws -> DeploymentInfo {
+        let body: [String: Any] = ["approved": true]
+        let jsonData = try JSONSerialization.data(withJSONObject: body)
+        let data = try await post("/api/deploy/deployments/\(deploymentId)/run", body: jsonData)
+        return try decode(DeploymentInfo.self, from: data, context: "/api/deploy/deployments/\(deploymentId)/run")
+    }
+
+    func teardownDeployment(deploymentId: String) async throws -> DeploymentInfo {
+        let body: [String: Any] = ["approved": true]
+        let jsonData = try JSONSerialization.data(withJSONObject: body)
+        let data = try await post("/api/deploy/deployments/\(deploymentId)/teardown", body: jsonData)
+        return try decode(DeploymentInfo.self, from: data, context: "/api/deploy/deployments/\(deploymentId)/teardown")
+    }
+
+    func cancelDeployment(deploymentId: String) async throws -> DeploymentInfo {
+        let data = try await post("/api/deploy/deployments/\(deploymentId)/cancel", body: nil)
+        return try decode(DeploymentInfo.self, from: data, context: "/api/deploy/deployments/\(deploymentId)/cancel")
     }
 
     // MARK: - HTTP helpers

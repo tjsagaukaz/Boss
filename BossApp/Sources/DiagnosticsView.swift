@@ -18,6 +18,8 @@ struct DiagnosticsView: View {
                     repoCard(status)
                     runtimeCard(status)
                     bossControlCard(status)
+                    providersCard(status)
+                    deployCard
                     promptLayersCard
                 } else {
                     emptyState
@@ -192,6 +194,159 @@ struct DiagnosticsView: View {
                     .font(.system(size: 11))
                     .foregroundColor(Color.white.opacity(0.34))
                     .lineLimit(1)
+            }
+        }
+    }
+
+    private func providersCard(_ status: SystemStatusInfo) -> some View {
+        let registry = status.providerRegistry
+        return card {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Providers")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(Color.white.opacity(0.9))
+
+                if let providers = registry?.providers, !providers.isEmpty {
+                    ForEach(providers) { provider in
+                        providerRow(provider)
+                    }
+
+                    if let routing = registry?.routing, !routing.isEmpty {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("ROUTING")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundColor(Color.white.opacity(0.28))
+                                .tracking(1.0)
+                            ForEach(routing.sorted(by: { $0.key < $1.key }), id: \.key) { mode, target in
+                                HStack(spacing: 6) {
+                                    Text(mode)
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundColor(Color.white.opacity(0.64))
+                                        .frame(width: 80, alignment: .leading)
+                                    Text("→")
+                                        .font(.system(size: 11))
+                                        .foregroundColor(Color.white.opacity(0.32))
+                                    Text(target)
+                                        .font(.system(size: 11))
+                                        .foregroundColor(Color.white.opacity(0.58))
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    Text("No providers registered.")
+                        .font(.system(size: 12))
+                        .foregroundColor(Color.white.opacity(0.42))
+                }
+            }
+        }
+    }
+
+    private func providerRow(_ provider: ProviderInfoItem) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(provider.name)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(Color.white.opacity(0.82))
+
+                Text(provider.kind)
+                    .font(.system(size: 10))
+                    .foregroundColor(Color.white.opacity(0.38))
+
+                Spacer()
+
+                providerHealthBadge(provider.health)
+            }
+
+            if let caps = provider.capabilities, !caps.isEmpty {
+                HStack(spacing: 8) {
+                    ForEach(caps, id: \.self) { cap in
+                        HStack(spacing: 3) {
+                            Circle()
+                                .fill(Color.green.opacity(0.7))
+                                .frame(width: 5, height: 5)
+                            Text(cap)
+                                .font(.system(size: 10))
+                                .foregroundColor(Color.white.opacity(0.58))
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func providerHealthBadge(_ health: ProviderHealthInfo?) -> some View {
+        let status = health?.status ?? "unchecked"
+        let color: Color = {
+            switch status {
+            case "healthy": return .green
+            case "degraded": return .yellow
+            case "unavailable": return .red
+            default: return Color.white.opacity(0.3)
+            }
+        }()
+        return HStack(spacing: 4) {
+            Circle()
+                .fill(color.opacity(0.8))
+                .frame(width: 6, height: 6)
+            Text(status.capitalized)
+                .font(.system(size: 10))
+                .foregroundColor(color.opacity(0.9))
+            if let ms = health?.latencyMs {
+                Text(String(format: "%.0fms", ms))
+                    .font(.system(size: 9))
+                    .foregroundColor(Color.white.opacity(0.28))
+            }
+        }
+    }
+
+    private var deployCard: some View {
+        card {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text("Deploy")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(Color.white.opacity(0.9))
+
+                    if let ds = vm.deployStatus {
+                        statusBadge(ds.enabled ? "Enabled" : "Disabled")
+                    }
+                }
+
+                if let ds = vm.deployStatus {
+                    HStack(spacing: 24) {
+                        metric(label: "Configured", value: "\(ds.configuredCount)")
+                        metric(label: "Live Deploys", value: "\(ds.liveCount)")
+                    }
+
+                    if !ds.adapters.isEmpty {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("ADAPTERS")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundColor(Color.white.opacity(0.28))
+                                .tracking(1.0)
+                            ForEach(ds.adapters, id: \.adapter) { info in
+                                HStack(spacing: 6) {
+                                    Circle()
+                                        .fill(info.configured ? Color.green.opacity(0.7) : Color.white.opacity(0.15))
+                                        .frame(width: 6, height: 6)
+                                    Text(info.adapter)
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundColor(Color.white.opacity(info.configured ? 0.78 : 0.38))
+                                    Spacer()
+                                    Text(info.configured ? "Ready" : "Not configured")
+                                        .font(.system(size: 10))
+                                        .foregroundColor(Color.white.opacity(0.34))
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    Text("Deploy status not loaded.")
+                        .font(.system(size: 12))
+                        .foregroundColor(Color.white.opacity(0.42))
+                }
             }
         }
     }

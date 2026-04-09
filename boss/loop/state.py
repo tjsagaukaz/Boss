@@ -31,6 +31,7 @@ class LoopPhase(StrEnum):
     EDIT = "edit"
     TEST = "test"
     INSPECT = "inspect"
+    VERIFY_PREVIEW = "verify_preview"
     DONE = "done"
 
 
@@ -80,6 +81,8 @@ class LoopAttempt:
     assistant_output: str = ""
     error: str | None = None
     stop_reason: str | None = None
+    verification_method: str | None = None
+    preview_evidence: dict | None = None
 
     @property
     def duration_ms(self) -> float:
@@ -100,6 +103,8 @@ class LoopAttempt:
             "assistant_output": self.assistant_output,
             "error": self.error,
             "stop_reason": self.stop_reason,
+            "verification_method": self.verification_method,
+            "preview_evidence": self.preview_evidence,
         }
 
     @classmethod
@@ -116,6 +121,8 @@ class LoopAttempt:
             assistant_output=data.get("assistant_output", ""),
             error=data.get("error"),
             stop_reason=data.get("stop_reason"),
+            verification_method=data.get("verification_method"),
+            preview_evidence=data.get("preview_evidence"),
         )
 
 

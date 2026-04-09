@@ -35,6 +35,12 @@ from boss.tools.memory import (
     remember,
     search_project_content,
 )
+from boss.tools.preview import (
+    capture_preview,
+    preview_status_tool,
+    start_preview_server,
+    stop_preview_server,
+)
 from boss.tools.research import web_search
 
 set_tracing_disabled(not settings.tracing_enabled)
@@ -123,12 +129,14 @@ def build_entry_agent(
     research_tools = _filter_tools([web_search], policy=policy) if settings.cloud_api_key else []
     general_tools = _filter_tools(
         [remember, recall, list_known_projects, get_project_details, search_project_content, memory_stats,
-         find_symbol, find_definition, search_code_symbolic, search_code_semantic, project_graph, find_importers],
+         find_symbol, find_definition, search_code_symbolic, search_code_semantic, project_graph, find_importers,
+         start_preview_server, stop_preview_server, capture_preview, preview_status_tool],
         policy=policy,
     )
     code_tools = _filter_tools(
         [recall, list_known_projects, get_project_details, search_project_content,
-         find_symbol, find_definition, search_code_symbolic, search_code_semantic, project_graph, find_importers],
+         find_symbol, find_definition, search_code_symbolic, search_code_semantic, project_graph, find_importers,
+         start_preview_server, stop_preview_server, capture_preview, preview_status_tool],
         policy=policy,
     )
 

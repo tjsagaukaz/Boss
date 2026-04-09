@@ -2297,11 +2297,21 @@ async def system_status():
         pending_runs_count=pending_runs_count,
         jobs=jobs,
     )
+
+    # Provider registry diagnostics
+    try:
+        from boss.providers.registry import provider_diagnostics as _provider_diag
+
+        provider_registry = _provider_diag()
+    except Exception:
+        provider_registry = None
+
     return {
         "provider": "openai",
         "provider_mode": provider_mode,
         "provider_session_mode": resolve_provider_session_mode(),
         "responses_supported": supports_responses_mode(),
+        "provider_registry": provider_registry,
         "app_version": runtime["app_version"],
         "build_marker": runtime["build_marker"],
         "models": {
@@ -2363,6 +2373,110 @@ async def prompt_diagnostics(mode: str = "agent", agent_name: str = "general", t
         **summary,
         "instructions_preview": result.text[:2000],
     }
+
+
+@app.get("/api/system/providers")
+async def provider_status():
+    """Return provider registry: providers, capabilities, routing, and health."""
+    from boss.providers.registry import get_registry, check_provider_health
+
+    registry = get_registry()
+    # Run health checks
+    for provider in registry.providers:
+        health = check_provider_health(provider)
+        provider.health = health
+
+    return registry.diagnostics()
+
+
+# --- Preview endpoints ---
+
+@app.get("/api/preview/status")
+async def get_preview_status(project_path: str | None = None):
+    """Return preview session status and capabilities."""
+    from boss.preview.server import preview_status
+    return preview_status(project_path)
+
+
+@app.get("/api/preview/capabilities")
+async def get_preview_capabilities():
+    """Return available preview tooling on this machine."""
+    from boss.preview.session import detect_preview_capabilities
+    return detect_preview_capabilities().to_dict()
+
+
+@app.post("/api/preview/start")
+async def start_preview_endpoint(req: dict):
+    """Start a preview server for a project."""
+    from boss.preview.server import start_preview
+    from boss.runner.engine import get_runner
+
+    project_path = req.get("project_path", "")
+    if not project_path:
+        raise HTTPException(status_code=400, detail="project_path is required")
+    command = req.get("command")
+    port = req.get("port")
+
+    # Establish runner context so start_preview() enforces policy
+    get_runner(mode="agent", workspace_root=project_path)
+
+    session = start_preview(project_path, command=command, port=port)
+    return session.to_dict()
+
+
+@app.post("/api/preview/stop")
+async def stop_preview_endpoint(req: dict):
+    """Stop a running preview server."""
+    from boss.preview.server import stop_preview
+    project_path = req.get("project_path", "")
+    if not project_path:
+        raise HTTPException(status_code=400, detail="project_path is required")
+    stopped = stop_preview(project_path)
+    return {"stopped": stopped}
+
+
+@app.post("/api/preview/capture")
+async def capture_preview_endpoint(req: dict):
+    """Capture a screenshot and diagnostics from a preview URL."""
+    import time
+    from boss.preview.session import capture_screenshot, get_active_session
+    from boss.runner.engine import get_runner
+
+    url = req.get("url", "")
+    project_path = req.get("project_path", "")
+    detail_mode = req.get("detail_mode", "auto")
+    region = req.get("region")
+
+    if not url:
+        session = get_active_session(project_path or None)
+        if session and session.url:
+            url = session.url
+        else:
+            raise HTTPException(status_code=400, detail="No URL provided and no active preview session")
+
+    # Establish runner context so capture enforces policy
+    get_runner(mode="agent", workspace_root=project_path or None)
+
+    captures_dir = settings.app_data_dir / "preview_captures"
+    captures_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = int(time.time())
+    output_path = captures_dir / f"capture_{timestamp}.png"
+
+    capture_kwargs: dict = {"detail_mode": detail_mode}
+    if region and isinstance(region, dict):
+        from boss.preview.session import CaptureRegion
+
+        capture_kwargs["region"] = CaptureRegion.from_dict(region)
+
+    result = capture_screenshot(url, output_path, **capture_kwargs)
+
+    # Update session metadata
+    if project_path:
+        session = get_active_session(project_path)
+        if session:
+            session.last_capture = result
+
+    return result.to_dict()
 
 
 # --- Runner / Task Workspace endpoints ---
@@ -2474,6 +2588,247 @@ async def intelligence_stats():
     except Exception:
         pass
     return stats
+
+
+# ── Workers API ─────────────────────────────────────────────────────
+
+
+@app.get("/api/workers/plans")
+async def list_work_plans_endpoint(limit: int = 50):
+    from boss.workers.state import list_work_plans
+    safe_limit = max(1, min(limit, 200))
+    return [p.to_dict() for p in list_work_plans(limit=safe_limit)]
+
+
+@app.get("/api/workers/plans/{plan_id}")
+async def get_work_plan_endpoint(plan_id: str):
+    from boss.workers.state import load_work_plan
+    plan = load_work_plan(plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Work plan not found")
+    return plan.to_dict()
+
+
+@app.post("/api/workers/plans")
+async def create_work_plan_endpoint(request: Request):
+    from boss.workers.coordinator import create_work_plan
+    body = await request.json()
+    task = body.get("task", "").strip()
+    if not task:
+        raise HTTPException(status_code=400, detail="task is required")
+    project_path = body.get("project_path") or str(load_boss_control().root)
+    session_id = body.get("session_id") or str(uuid.uuid4())
+    max_concurrent = body.get("max_concurrent", settings.max_concurrent_workers)
+    plan = create_work_plan(
+        task=task,
+        project_path=project_path,
+        session_id=session_id,
+        max_concurrent=max_concurrent,
+    )
+    return plan.to_dict()
+
+
+@app.post("/api/workers/plans/{plan_id}/workers")
+async def add_worker_endpoint(plan_id: str, request: Request):
+    from boss.workers.coordinator import add_worker
+    from boss.workers.roles import WorkerRole
+    from boss.workers.state import load_work_plan
+    plan = load_work_plan(plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Work plan not found")
+    body = await request.json()
+    role_str = body.get("role", "").strip()
+    scope = body.get("scope", "").strip()
+    if not role_str or not scope:
+        raise HTTPException(status_code=400, detail="role and scope are required")
+    try:
+        role = WorkerRole(role_str)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid role: {role_str}")
+    file_targets = body.get("file_targets", [])
+    worker = add_worker(plan, role=role, scope=scope, file_targets=file_targets)
+    return worker.to_dict()
+
+
+@app.post("/api/workers/plans/{plan_id}/validate")
+async def validate_plan_endpoint(plan_id: str):
+    from boss.workers.coordinator import validate_plan, validate_plan_directory_overlap
+    from boss.workers.state import load_work_plan
+    plan = load_work_plan(plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Work plan not found")
+    file_report = validate_plan(plan)
+    dir_report = validate_plan_directory_overlap(plan)
+    return {
+        "file_conflicts": {
+            "has_conflicts": file_report.has_conflicts,
+            "detail": file_report.summary(),
+        },
+        "directory_overlap": {
+            "has_conflicts": dir_report.has_conflicts,
+            "detail": dir_report.summary(),
+        },
+    }
+
+
+@app.post("/api/workers/plans/{plan_id}/ready")
+async def mark_plan_ready_endpoint(plan_id: str, request: Request):
+    from boss.workers.coordinator import mark_plan_ready
+    from boss.workers.state import load_work_plan
+    plan = load_work_plan(plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Work plan not found")
+    body = await request.json() if await request.body() else {}
+    force = body.get("force", False)
+    report = mark_plan_ready(plan, force=force)
+    return {
+        "status": plan.status,
+        "conflict_report": report.summary(),
+    }
+
+
+@app.post("/api/workers/plans/{plan_id}/execute")
+async def execute_plan_endpoint(plan_id: str):
+    from boss.workers.engine import execute_plan
+    from boss.workers.state import load_work_plan, WorkPlanStatus
+    plan = load_work_plan(plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Work plan not found")
+    if plan.status != WorkPlanStatus.READY.value:
+        raise HTTPException(status_code=400, detail=f"Plan must be in ready state, got {plan.status}")
+
+    async def _stream():
+        async for event in execute_plan(plan):
+            yield sse_event(event)
+        yield sse_event({"type": "done", "plan_id": plan.plan_id})
+
+    return StreamingResponse(_stream(), media_type="text/event-stream")
+
+
+@app.post("/api/workers/plans/{plan_id}/cancel")
+async def cancel_plan_endpoint(plan_id: str):
+    from boss.workers.engine import cancel_running_plan
+    from boss.workers.state import load_work_plan
+    plan = load_work_plan(plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Work plan not found")
+    updated = await cancel_running_plan(plan)
+    return updated.to_dict()
+
+
+@app.get("/api/workers/plans/{plan_id}/summary")
+async def plan_summary_endpoint(plan_id: str):
+    from boss.workers.coordinator import plan_summary
+    from boss.workers.state import load_work_plan
+    plan = load_work_plan(plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Work plan not found")
+    return plan_summary(plan)
+
+
+# --- Deploy endpoints ---
+
+
+@app.get("/api/deploy/status")
+async def deploy_status_endpoint():
+    from boss.deploy.engine import deploy_status
+    return deploy_status()
+
+
+@app.get("/api/deploy/deployments")
+async def list_deployments_endpoint(limit: int = 50):
+    from boss.deploy.state import list_deployments
+    safe_limit = max(1, min(limit, 200))
+    return [d.to_dict() for d in list_deployments(limit=safe_limit)]
+
+
+@app.get("/api/deploy/deployments/{deployment_id}")
+async def get_deployment_endpoint(deployment_id: str):
+    from boss.deploy.state import load_deployment
+    deploy = load_deployment(deployment_id)
+    if deploy is None:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+    return deploy.to_dict()
+
+
+@app.post("/api/deploy/deployments")
+async def create_deployment_endpoint(request: Request):
+    from boss.deploy.engine import create_deployment
+    body = await request.json()
+    project_path = body.get("project_path", "").strip()
+    if not project_path:
+        raise HTTPException(status_code=400, detail="project_path is required")
+    if not settings.deploy_enabled:
+        raise HTTPException(status_code=403, detail="Deployment is not enabled. Set BOSS_DEPLOY_ENABLED=true.")
+    if not body.get("approved"):
+        raise HTTPException(
+            status_code=403,
+            detail="Deploy actions require explicit approval. Set approved=true to confirm.",
+        )
+    try:
+        deploy = create_deployment(
+            project_path=project_path,
+            session_id=body.get("session_id", "api"),
+            adapter_name=body.get("adapter") or None,
+            target=body.get("target", "preview"),
+        )
+        logger.info(
+            "Deployment created via API: deployment_id=%s adapter=%s project=%s",
+            deploy.deployment_id, deploy.adapter, project_path,
+        )
+        return deploy.to_dict()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/deploy/deployments/{deployment_id}/run")
+async def run_deployment_endpoint(request: Request, deployment_id: str):
+    from boss.deploy.engine import run_deployment
+    if not settings.deploy_enabled:
+        raise HTTPException(status_code=403, detail="Deployment is not enabled.")
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    if not body.get("approved"):
+        raise HTTPException(
+            status_code=403,
+            detail="Deploy execution requires explicit approval. Set approved=true to confirm.",
+        )
+    try:
+        logger.info("Deployment run approved via API: deployment_id=%s", deployment_id)
+        deploy = run_deployment(deployment_id)
+        return deploy.to_dict()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/deploy/deployments/{deployment_id}/teardown")
+async def teardown_deployment_endpoint(request: Request, deployment_id: str):
+    from boss.deploy.engine import teardown_deployment
+    if not settings.deploy_enabled:
+        raise HTTPException(status_code=403, detail="Deployment is not enabled.")
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    if not body.get("approved"):
+        raise HTTPException(
+            status_code=403,
+            detail="Teardown requires explicit approval. Set approved=true to confirm.",
+        )
+    try:
+        logger.info("Deployment teardown approved via API: deployment_id=%s", deployment_id)
+        deploy = teardown_deployment(deployment_id)
+        return deploy.to_dict()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/deploy/deployments/{deployment_id}/cancel")
+async def cancel_deployment_endpoint(deployment_id: str):
+    from boss.deploy.engine import cancel_deployment
+    if not settings.deploy_enabled:
+        raise HTTPException(status_code=403, detail="Deployment is not enabled.")
+    try:
+        deploy = cancel_deployment(deployment_id)
+        return deploy.to_dict()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 # --- Warm-up on startup ---

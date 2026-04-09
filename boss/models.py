@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,6 +22,8 @@ except ImportError:
 
 from boss.config import settings
 
+logger = logging.getLogger(__name__)
+
 
 def _get_client() -> AsyncOpenAI:
     if not settings.cloud_api_key:
@@ -38,18 +41,46 @@ def get_client() -> AsyncOpenAI:
     return _client
 
 
+def _get_provider_client(provider_name: str) -> AsyncOpenAI | None:
+    """Get an AsyncOpenAI client for a non-default provider (e.g. Ollama)."""
+    from boss.providers.registry import get_provider
+
+    info = get_provider(provider_name)
+    if info is None or not info.enabled:
+        return None
+
+    if info.kind in ("ollama", "openai_compatible"):
+        from boss.providers.ollama_provider import get_ollama_client
+
+        return get_ollama_client(info)
+
+    # For "openai" kind, use the default client
+    return get_client()
+
+
 class CloudModelProvider(ModelProvider):
-    """Route model names through the installed OpenAI provider surface with fallback."""
+    """Route model names through the provider registry, falling back to OpenAI."""
 
     def __init__(self, *, mode: str | None = None):
         self._mode = resolve_provider_mode(mode)
 
     def get_model(self, model_name: str | None) -> Model:
+        resolved_name = model_name or settings.general_model
+
+        # Check if a non-OpenAI provider is routed for this model
+        alt_client = _resolve_alternative_client(resolved_name)
+        if alt_client is not None:
+            logger.debug("Routing model %s through alternative provider", resolved_name)
+            return OpenAIChatCompletionsModel(
+                model=resolved_name,
+                openai_client=alt_client,
+            )
+
         delegate = _get_delegate_provider(self._mode)
         if delegate is not None:
-            return delegate.get_model(model_name)
+            return delegate.get_model(resolved_name)
         return OpenAIChatCompletionsModel(
-            model=model_name or settings.general_model,
+            model=resolved_name,
             openai_client=get_client(),
         )
 
@@ -62,6 +93,12 @@ class RunExecutionOptions:
 
 def supports_responses_mode() -> bool:
     return OpenAIProvider is not None and OpenAIResponsesModel is not None
+
+
+def supports_vision(model_name: str | None = None) -> bool:
+    """Check whether the given (or default) model supports image/vision input."""
+    from boss.preview.vision import model_supports_vision
+    return model_supports_vision(model_name or settings.general_model)
 
 
 def resolve_provider_mode(mode: str | None = None) -> str:
@@ -165,3 +202,23 @@ def _should_trigger_compaction(context: dict[str, Any]) -> bool:
     if not isinstance(candidate_items, list):
         return False
     return len(candidate_items) >= settings.provider_compaction_threshold
+
+
+def _resolve_alternative_client(model_name: str) -> AsyncOpenAI | None:
+    """Check if a model should be routed through a non-OpenAI provider.
+
+    Returns an AsyncOpenAI client for the alternative provider, or None
+    to use the default OpenAI path.
+    """
+    try:
+        from boss.providers.registry import get_registry
+
+        registry = get_registry()
+        for provider in registry.enabled_providers:
+            if provider.kind == "openai":
+                continue
+            if provider.models and model_name in provider.models:
+                return _get_provider_client(provider.name)
+    except Exception:
+        pass
+    return None

@@ -94,6 +94,7 @@ _MODE_PROFILE_DEFAULTS: dict[str, str] = {
     "plan": PermissionProfile.READ_ONLY,
     "review": PermissionProfile.READ_ONLY,
     "agent": PermissionProfile.WORKSPACE_WRITE,
+    "deploy": PermissionProfile.FULL_ACCESS,
 }
 
 

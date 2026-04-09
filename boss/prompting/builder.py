@@ -24,6 +24,7 @@ from pathlib import Path
 from boss.prompting.core_instructions import (
     CORE_OPERATING,
     FRONTEND_GUIDANCE,
+    PREVIEW_GUIDANCE,
     REVIEW_DISCIPLINE,
 )
 from boss.prompting.layers import PromptLayer, PromptLayerKind
@@ -161,6 +162,14 @@ class PromptBuilder:
             kind=PromptLayerKind.FRONTEND,
             source="core_instructions.FRONTEND_GUIDANCE",
             content=FRONTEND_GUIDANCE,
+            active=frontend_active,
+        ))
+
+        # 9. Preview verification guidance (active alongside frontend)
+        layers.append(PromptLayer(
+            kind=PromptLayerKind.FRONTEND,
+            source="core_instructions.PREVIEW_GUIDANCE",
+            content=PREVIEW_GUIDANCE,
             active=frontend_active,
         ))
 

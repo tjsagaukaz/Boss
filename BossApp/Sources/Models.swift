@@ -41,6 +41,9 @@ enum AppSurface: Equatable {
     case jobs
     case review
     case permissions
+    case preview
+    case workers
+    case deploy
 }
 
 enum WorkMode: String, CaseIterable, Codable, Equatable {
@@ -941,6 +944,90 @@ struct PromptDiagnosticsInfo: Decodable {
     }
 }
 
+struct PreviewCapabilitiesInfo: Decodable {
+    let hasBrowser: Bool
+    let browserPath: String?
+    let hasPlaywright: Bool
+    let hasNode: Bool
+    let hasSwiftBuild: Bool
+    let policyEnforced: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case hasBrowser = "has_browser"
+        case browserPath = "browser_path"
+        case hasPlaywright = "has_playwright"
+        case hasNode = "has_node"
+        case hasSwiftBuild = "has_swift_build"
+        case policyEnforced = "policy_enforced"
+    }
+}
+
+struct PreviewCaptureInfo: Decodable {
+    let screenshotPath: String?
+    let domSummary: String?
+    let consoleErrors: [String]?
+    let networkErrors: [String]?
+    let pageTitle: String?
+    let timestamp: Double?
+    let detailMode: String?
+    let verificationMethod: String?
+    let region: [String: Int]?
+    let policyEnforced: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case screenshotPath = "screenshot_path"
+        case domSummary = "dom_summary"
+        case consoleErrors = "console_errors"
+        case networkErrors = "network_errors"
+        case pageTitle = "page_title"
+        case timestamp
+        case detailMode = "detail_mode"
+        case verificationMethod = "verification_method"
+        case region
+        case policyEnforced = "policy_enforced"
+    }
+}
+
+struct PreviewSessionInfo: Decodable {
+    let sessionId: String
+    let projectPath: String
+    let url: String?
+    let status: String
+    let startCommand: String?
+    let pid: Int?
+    let startedAt: Double?
+    let errorMessage: String?
+    let lastCapture: PreviewCaptureInfo?
+    let verificationMethod: String?
+    let policyEnforced: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case sessionId = "session_id"
+        case projectPath = "project_path"
+        case url, status
+        case startCommand = "start_command"
+        case pid
+        case startedAt = "started_at"
+        case errorMessage = "error_message"
+        case lastCapture = "last_capture"
+        case verificationMethod = "verification_method"
+        case policyEnforced = "policy_enforced"
+    }
+}
+
+struct PreviewStatusInfo: Decodable {
+    let capabilities: PreviewCapabilitiesInfo
+    let sessions: [PreviewSessionInfo]
+    let activeCount: Int
+    let visionAvailable: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case capabilities, sessions
+        case activeCount = "active_count"
+        case visionAvailable = "vision_available"
+    }
+}
+
 struct DiagnosticsSummaryInfo: Decodable {
     let providerMode: String?
     let gitAvailable: Bool?
@@ -986,6 +1073,7 @@ struct SystemStatusInfo: Decodable {
     let bossControl: BossControlStatusInfo?
     let bossControlHealth: BossControlHealthInfo?
     let diagnostics: DiagnosticsSummaryInfo?
+    let providerRegistry: ProviderRegistryInfo?
     let pendingRunsCount: Int?
     let pendingApprovalsCount: Int?
     let stalePendingRunsCount: Int?
@@ -1006,10 +1094,57 @@ struct SystemStatusInfo: Decodable {
         case bossControl = "boss_control"
         case bossControlHealth = "boss_control_health"
         case diagnostics
+        case providerRegistry = "provider_registry"
         case pendingRunsCount = "pending_runs_count"
         case pendingApprovalsCount = "pending_approvals_count"
         case stalePendingRunsCount = "stale_pending_runs_count"
         case backgroundJobsCount = "background_jobs_count"
+    }
+}
+
+// MARK: - Provider Registry
+
+struct ProviderRegistryInfo: Decodable {
+    let providers: [ProviderInfoItem]?
+    let routing: [String: String]?
+    let capabilityMap: [String: [String]]?
+
+    enum CodingKeys: String, CodingKey {
+        case providers
+        case routing
+        case capabilityMap = "capability_map"
+    }
+}
+
+struct ProviderInfoItem: Decodable, Identifiable {
+    var id: String { name }
+
+    let name: String
+    let kind: String
+    let baseUrl: String?
+    let capabilities: [String]?
+    let models: [String]?
+    let enabled: Bool?
+    let health: ProviderHealthInfo?
+
+    enum CodingKeys: String, CodingKey {
+        case name, kind
+        case baseUrl = "base_url"
+        case capabilities, models, enabled, health
+    }
+}
+
+struct ProviderHealthInfo: Decodable {
+    let status: String
+    let latencyMs: Double?
+    let error: String?
+    let checkedAt: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case latencyMs = "latency_ms"
+        case error
+        case checkedAt = "checked_at"
     }
 }
 
@@ -1089,4 +1224,196 @@ struct LoopAttemptInfo: Equatable {
     let attemptNumber: Int
     let phase: String
     let budgetRemaining: LoopStatusInfo.LoopBudgetRemaining?
+}
+
+
+// MARK: - Workers
+
+enum WorkerRole: String, CaseIterable, Codable {
+    case explorer
+    case implementer
+    case reviewer
+
+    var label: String {
+        switch self {
+        case .explorer: return "Explorer"
+        case .implementer: return "Implementer"
+        case .reviewer: return "Reviewer"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .explorer: return "Read-only context gathering"
+        case .implementer: return "Isolated coding work"
+        case .reviewer: return "Read-only validation"
+        }
+    }
+}
+
+struct WorkerInfo: Identifiable, Decodable, Equatable {
+    let workerId: String
+    let planId: String
+    let role: String
+    let scope: String
+    let fileTargets: [String]
+    let state: String
+    let workspaceId: String?
+    let workspacePath: String?
+    let startedAt: Double?
+    let finishedAt: Double?
+    let error: String?
+    let resultSummary: String
+    let outputArtifacts: [String]
+    let logLines: [String]
+
+    var id: String { workerId }
+
+    enum CodingKeys: String, CodingKey {
+        case workerId = "worker_id"
+        case planId = "plan_id"
+        case role
+        case scope
+        case fileTargets = "file_targets"
+        case state
+        case workspaceId = "workspace_id"
+        case workspacePath = "workspace_path"
+        case startedAt = "started_at"
+        case finishedAt = "finished_at"
+        case error
+        case resultSummary = "result_summary"
+        case outputArtifacts = "output_artifacts"
+        case logLines = "log_lines"
+    }
+}
+
+struct WorkPlanInfo: Identifiable, Decodable, Equatable {
+    let planId: String
+    let task: String
+    let projectPath: String
+    let sessionId: String
+    let status: String
+    let workers: [WorkerInfo]
+    let mergeStrategy: String
+    let mergeSummary: String
+    let createdAt: Double
+    let updatedAt: Double
+    let finishedAt: Double?
+    let error: String?
+    let maxConcurrent: Int
+
+    var id: String { planId }
+
+    enum CodingKeys: String, CodingKey {
+        case planId = "plan_id"
+        case task
+        case projectPath = "project_path"
+        case sessionId = "session_id"
+        case status
+        case workers
+        case mergeStrategy = "merge_strategy"
+        case mergeSummary = "merge_summary"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case finishedAt = "finished_at"
+        case error
+        case maxConcurrent = "max_concurrent"
+    }
+}
+
+struct WorkPlanSummaryInfo: Decodable, Equatable {
+    let planId: String
+    let task: String
+    let status: String
+    let workerCount: Int
+    let workersByState: [String: Int]
+    let mergeStrategy: String
+    let mergeSummary: String
+
+    enum CodingKeys: String, CodingKey {
+        case planId = "plan_id"
+        case task
+        case status
+        case workerCount = "worker_count"
+        case workersByState = "workers_by_state"
+        case mergeStrategy = "merge_strategy"
+        case mergeSummary = "merge_summary"
+    }
+}
+
+struct ConflictValidationInfo: Decodable, Equatable {
+    let fileConflicts: ConflictSection
+    let directoryOverlap: ConflictSection
+
+    struct ConflictSection: Decodable, Equatable {
+        let hasConflicts: Bool
+        let detail: String
+
+        enum CodingKeys: String, CodingKey {
+            case hasConflicts = "has_conflicts"
+            case detail
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case fileConflicts = "file_conflicts"
+        case directoryOverlap = "directory_overlap"
+    }
+}
+
+// MARK: - Deploy Models
+
+struct DeployStatusInfo: Decodable, Equatable {
+    let enabled: Bool
+    let adapters: [DeployAdapterInfo]
+    let configuredCount: Int
+    let recentDeployments: Int
+    let liveCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case adapters
+        case configuredCount = "configured_count"
+        case recentDeployments = "recent_deployments"
+        case liveCount = "live_count"
+    }
+}
+
+struct DeployAdapterInfo: Decodable, Equatable {
+    let adapter: String
+    let configured: Bool
+}
+
+struct DeploymentInfo: Identifiable, Decodable, Equatable {
+    let deploymentId: String
+    let projectPath: String
+    let sessionId: String
+    let adapter: String
+    let target: String
+    let status: String
+    let previewUrl: String?
+    let buildLog: String
+    let deployLog: String
+    let error: String?
+    let createdAt: Double
+    let updatedAt: Double
+    let finishedAt: Double?
+
+    var id: String { deploymentId }
+
+    enum CodingKeys: String, CodingKey {
+        case deploymentId = "deployment_id"
+        case projectPath = "project_path"
+        case sessionId = "session_id"
+        case adapter
+        case target
+        case status
+        case previewUrl = "preview_url"
+        case buildLog = "build_log"
+        case deployLog = "deploy_log"
+        case error
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case finishedAt = "finished_at"
+    }
 }

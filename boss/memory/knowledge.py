@@ -17,6 +17,18 @@ from boss.config import settings
 _TEXT_CHUNK_SIZE = 900
 _MAX_FILE_CHUNKS = 4
 _MAX_TEXT_FILE_BYTES = settings.project_scan_max_file_bytes
+
+# Current schema version.  Bump this and add a migration function
+# to _SCHEMA_MIGRATIONS whenever the schema changes.
+SCHEMA_VERSION = 1
+
+# Migration functions keyed by TARGET version.  Each receives the
+# sqlite3 connection and must apply the DDL for that version step.
+# The caller handles the version bump and commit.
+_SCHEMA_MIGRATIONS: dict[int, Any] = {
+    # Example for v2:
+    # 2: _migrate_v1_to_v2,
+}
 _TEXT_FILE_EXTENSIONS = {
     ".c",
     ".cc",
@@ -209,6 +221,11 @@ class MemorySearchResult:
 
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    version INTEGER NOT NULL DEFAULT 1
+);
+
 CREATE TABLE IF NOT EXISTS facts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     category TEXT NOT NULL,
@@ -372,10 +389,14 @@ class KnowledgeStore:
             db_path = settings.knowledge_db_file
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self._conn = sqlite3.connect(
+            str(self.db_path), check_same_thread=False, timeout=5.0
+        )
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(_SCHEMA)
+        self._ensure_schema_version()
         self._ensure_schema_extensions()
         self._migrate_legacy_data()
 
@@ -1623,6 +1644,42 @@ class KnowledgeStore:
         }
 
     # --- Backfill and migration ---
+
+    def _ensure_schema_version(self) -> None:
+        """Track and upgrade the schema version.
+
+        On a fresh DB the schema_version table is empty — seed it at
+        SCHEMA_VERSION.  On an existing DB, run any pending migrations
+        sequentially to bring it up to SCHEMA_VERSION.
+        """
+        row = self._conn.execute(
+            "SELECT version FROM schema_version WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            self._conn.execute(
+                "INSERT INTO schema_version (id, version) VALUES (1, ?)",
+                (SCHEMA_VERSION,),
+            )
+            self._conn.commit()
+            return
+
+        current = int(row["version"])
+        if current >= SCHEMA_VERSION:
+            return
+
+        # Run migrations sequentially from current+1 → SCHEMA_VERSION.
+        for target in range(current + 1, SCHEMA_VERSION + 1):
+            migrator = _SCHEMA_MIGRATIONS.get(target)
+            if migrator is None:
+                raise RuntimeError(
+                    f"No migration defined for schema version {target}"
+                )
+            migrator(self._conn)
+            self._conn.execute(
+                "UPDATE schema_version SET version = ? WHERE id = 1",
+                (target,),
+            )
+            self._conn.commit()
 
     def _ensure_schema_extensions(self) -> None:
         self._ensure_column("durable_memories", "pinned", "INTEGER NOT NULL DEFAULT 0")

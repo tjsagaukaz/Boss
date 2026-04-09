@@ -44,6 +44,15 @@ final class ChatViewModel: ObservableObject {
     @Published var jobsRefreshError: String?
     @Published var reviewRefreshError: String?
     @Published var permissionsRefreshError: String?
+    @Published var previewStatus: PreviewStatusInfo?
+    @Published var previewRefreshError: String?
+    @Published var workPlans: [WorkPlanInfo] = []
+    @Published var selectedWorkPlan: WorkPlanInfo?
+    @Published var workersRefreshError: String?
+    @Published var deployStatus: DeployStatusInfo?
+    @Published var deployments: [DeploymentInfo] = []
+    @Published var selectedDeployment: DeploymentInfo?
+    @Published var deployRefreshError: String?
     @Published var startupIssue: String?
 
     private let api = APIClient.shared
@@ -454,6 +463,7 @@ final class ChatViewModel: ObservableObject {
         do {
             systemStatus = try await api.fetchSystemStatus()
             promptDiagnostics = try? await api.fetchPromptDiagnostics(mode: selectedMode.rawValue)
+            deployStatus = try? await api.fetchDeployStatus()
             diagnosticsRefreshError = nil
         } catch {
             diagnosticsRefreshError = "Diagnostics refresh failed. \(errorMessage(error))"
@@ -519,6 +529,21 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    func refreshWorkersSurface() async {
+        do {
+            workPlans = try await api.fetchWorkPlans(limit: 50)
+            if let current = selectedWorkPlan,
+               let refreshed = workPlans.first(where: { $0.planId == current.planId }) {
+                selectedWorkPlan = refreshed
+            } else if selectedWorkPlan == nil {
+                selectedWorkPlan = workPlans.first
+            }
+            workersRefreshError = nil
+        } catch {
+            workersRefreshError = "Workers refresh failed. \(errorMessage(error))"
+        }
+    }
+
     func showChat() {
         selectedSurface = .chat
     }
@@ -552,6 +577,46 @@ final class ChatViewModel: ObservableObject {
         }
         selectedSurface = .review
         Task { await refreshReviewSurface() }
+    }
+
+    func showPreview() {
+        selectedSurface = .preview
+        Task { await refreshPreviewSurface() }
+    }
+
+    func showWorkers() {
+        selectedSurface = .workers
+        Task { await refreshWorkersSurface() }
+    }
+
+    func showDeploy() {
+        selectedSurface = .deploy
+        Task { await refreshDeploySurface() }
+    }
+
+    func refreshPreviewSurface() async {
+        do {
+            previewStatus = try await api.fetchPreviewStatus()
+            previewRefreshError = nil
+        } catch {
+            previewRefreshError = "Preview refresh failed. \(errorMessage(error))"
+        }
+    }
+
+    func refreshDeploySurface() async {
+        do {
+            deployStatus = try await api.fetchDeployStatus()
+            deployments = try await api.fetchDeployments(limit: 50)
+            if let current = selectedDeployment,
+               let refreshed = deployments.first(where: { $0.deploymentId == current.deploymentId }) {
+                selectedDeployment = refreshed
+            } else if selectedDeployment == nil {
+                selectedDeployment = deployments.first
+            }
+            deployRefreshError = nil
+        } catch {
+            deployRefreshError = "Deploy refresh failed. \(errorMessage(error))"
+        }
     }
 
     func selectReviewTarget(_ target: ReviewTargetKind) {

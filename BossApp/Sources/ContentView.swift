@@ -40,6 +40,12 @@ struct ContentView: View {
             ReviewView()
         case .permissions:
             PermissionsView()
+        case .preview:
+            PreviewView()
+        case .workers:
+            WorkersView()
+        case .deploy:
+            DeployView()
         }
     }
 }
@@ -103,6 +109,24 @@ struct SidebarView: View {
 
             sidebarNavRow("Permissions", selected: vm.selectedSurface == .permissions) {
                 vm.showPermissions()
+            }
+            .padding(.horizontal, 8)
+            .padding(.bottom, 4)
+
+            sidebarNavRow("Preview", selected: vm.selectedSurface == .preview) {
+                vm.showPreview()
+            }
+            .padding(.horizontal, 8)
+            .padding(.bottom, 4)
+
+            sidebarNavRow("Workers", selected: vm.selectedSurface == .workers) {
+                vm.showWorkers()
+            }
+            .padding(.horizontal, 8)
+            .padding(.bottom, 4)
+
+            sidebarNavRow("Deploy", selected: vm.selectedSurface == .deploy) {
+                vm.showDeploy()
             }
             .padding(.horizontal, 8)
             .padding(.bottom, 12)

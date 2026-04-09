@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextvars
 import os
 import re
+import signal
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -246,6 +247,160 @@ class RunnerEngine:
     def check_network(self, domain: str | None = None) -> CommandVerdict:
         """Check whether network access is allowed, optionally for a specific domain."""
         return self._policy.check_network(domain)
+
+    # ── Long-lived process management ──────────────────────────────
+
+    def start_managed_process(
+        self,
+        command: list[str],
+        *,
+        cwd: Path | str | None = None,
+        shell: bool = False,
+    ) -> tuple[subprocess.Popen | None, ExecutionResult]:
+        """Start a long-lived process under runner policy.
+
+        Runs the same command/path/cwd checks as ``run_command`` but uses
+        ``subprocess.Popen`` instead of ``subprocess.run``.  Returns the
+        process handle paired with the policy verdict.  If the verdict is
+        not ALLOWED the handle is None and the process is never started.
+        """
+        verdict = self._policy.check_command(command)
+
+        if verdict != CommandVerdict.ALLOWED:
+            reason = (
+                f"Command denied by {self._policy.profile.value} policy"
+                if verdict == CommandVerdict.DENIED
+                else f"Command requires approval under {self._policy.profile.value} policy"
+            )
+            return None, ExecutionResult(
+                command=command,
+                exit_code=None,
+                stdout="",
+                stderr="",
+                verdict=verdict.value,
+                policy_profile=self._policy.profile.value,
+                enforcement=self._policy.enforcement,
+                duration_ms=0.0,
+                working_directory=str(cwd) if cwd else None,
+                denied_reason=reason,
+            )
+
+        # Write-target check
+        write_targets = _extract_write_targets(command, cwd)
+        for target in write_targets:
+            wv = self._policy.check_write(target)
+            if wv != CommandVerdict.ALLOWED:
+                return None, ExecutionResult(
+                    command=command,
+                    exit_code=None,
+                    stdout="",
+                    stderr="",
+                    verdict=wv.value,
+                    policy_profile=self._policy.profile.value,
+                    enforcement=self._policy.enforcement,
+                    duration_ms=0.0,
+                    working_directory=str(cwd) if cwd else None,
+                    denied_reason=self._policy.path_policy.explain_denial(target),
+                )
+
+        # CWD boundary check for workspace_write profile
+        effective_cwd = cwd
+        if self._policy.profile == PermissionProfile.WORKSPACE_WRITE:
+            if effective_cwd is None and self._policy.path_policy.workspace_root:
+                effective_cwd = self._policy.path_policy.workspace_root
+            if effective_cwd is not None and self._policy.path_policy.writable_roots:
+                resolved_cwd = Path(effective_cwd).resolve()
+                cwd_allowed = any(
+                    _is_within(resolved_cwd, root)
+                    for root in self._policy.path_policy.writable_roots
+                )
+                if not cwd_allowed:
+                    return None, ExecutionResult(
+                        command=command,
+                        exit_code=None,
+                        stdout="",
+                        stderr="",
+                        verdict=CommandVerdict.DENIED.value,
+                        policy_profile=self._policy.profile.value,
+                        enforcement=self._policy.enforcement,
+                        duration_ms=0.0,
+                        working_directory=str(effective_cwd),
+                        denied_reason=f"Working directory {effective_cwd} is outside writable roots",
+                    )
+
+        working_dir = str(effective_cwd) if effective_cwd else None
+        env = self._policy.scrubbed_env() if self._policy.profile != PermissionProfile.FULL_ACCESS else None
+
+        try:
+            proc = subprocess.Popen(
+                command if not shell else " ".join(command),
+                shell=shell,
+                cwd=working_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                preexec_fn=os.setsid,
+                env=env,
+            )
+            return proc, ExecutionResult(
+                command=command,
+                exit_code=None,
+                stdout="",
+                stderr="",
+                verdict=verdict.value,
+                policy_profile=self._policy.profile.value,
+                enforcement=self._policy.enforcement,
+                duration_ms=0.0,
+                working_directory=working_dir,
+                env_scrubbed=env is not None,
+            )
+        except OSError as exc:
+            return None, ExecutionResult(
+                command=command,
+                exit_code=-1,
+                stdout="",
+                stderr=str(exc),
+                verdict=verdict.value,
+                policy_profile=self._policy.profile.value,
+                enforcement=self._policy.enforcement,
+                duration_ms=0.0,
+                working_directory=working_dir,
+                env_scrubbed=env is not None,
+                denied_reason=str(exc),
+            )
+
+    def terminate_managed_process(self, pid: int, *, sig: int = signal.SIGTERM) -> ExecutionResult:
+        """Terminate a previously started managed process by PID.
+
+        The kill goes through the runner so that it is recorded and
+        governed rather than bypassing the execution layer.
+        """
+        start = time.monotonic()
+        try:
+            os.killpg(os.getpgid(pid), sig)
+            duration_ms = (time.monotonic() - start) * 1000
+            return ExecutionResult(
+                command=["kill", f"-{sig}", str(pid)],
+                exit_code=0,
+                stdout="",
+                stderr="",
+                verdict=CommandVerdict.ALLOWED.value,
+                policy_profile=self._policy.profile.value,
+                enforcement=self._policy.enforcement,
+                duration_ms=duration_ms,
+            )
+        except (OSError, ProcessLookupError) as exc:
+            duration_ms = (time.monotonic() - start) * 1000
+            return ExecutionResult(
+                command=["kill", f"-{sig}", str(pid)],
+                exit_code=-1,
+                stdout="",
+                stderr=str(exc),
+                verdict=CommandVerdict.ALLOWED.value,
+                policy_profile=self._policy.profile.value,
+                enforcement=self._policy.enforcement,
+                duration_ms=duration_ms,
+                denied_reason=str(exc),
+            )
 
     def status_payload(self) -> dict[str, Any]:
         """Return diagnostic information about the active runner."""

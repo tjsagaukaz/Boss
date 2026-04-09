@@ -123,3 +123,20 @@ Frontend quality guidance:
   serve a clear functional purpose.
 - Validate the build compiles before calling the work done.\
 """
+
+
+# ── Preview verification guidance (activated alongside frontend) ───
+
+PREVIEW_GUIDANCE = """\
+Preview verification:
+- When preview tooling is available, use it to verify UI changes against
+  actual rendered output before concluding the task.
+- Check for console errors, failed network requests, and rendering
+  issues using preview capture.
+- If preview tooling is unavailable, state the limitation and note
+  which verification was skipped.
+- Reuse active preview sessions instead of starting new ones
+  unnecessarily.
+- Do not assume the UI looks correct from code alone — observable
+  evidence is preferred.\
+"""

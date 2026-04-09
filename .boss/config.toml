@@ -53,3 +53,23 @@ auto_mode_keywords = [
   "security review",
   "architecture review",
 ]
+
+# ── Provider configuration ──────────────────────────────────────────
+
+[providers.openai]
+enabled = true
+api_key_env = "OPENAI_API_KEY"
+# capabilities = ["chat", "streaming", "vision", "embeddings", "tool_use"]
+
+[providers.ollama]
+enabled = false
+base_url = "http://localhost:11434"
+# capabilities = ["chat", "streaming"]
+# models = ["qwen3:8b", "qwen3:14b"]
+
+[routing]
+chat = "openai"
+reasoning = "openai"
+embeddings = "openai"
+vision = "openai"
+fallback = "ollama"

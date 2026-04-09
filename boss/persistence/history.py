@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from boss.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 SESSION_STATE_VERSION = 2
@@ -93,7 +96,11 @@ def load_session_state(session_id: str) -> SessionState:
     if not path.exists():
         return SessionState(session_id=session_id)
 
-    payload = json.loads(path.read_text())
+    try:
+        payload = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Corrupt session file %s: %s — returning empty state", path, exc)
+        return SessionState(session_id=session_id)
 
     if isinstance(payload, list):
         state = SessionState(

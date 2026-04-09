@@ -105,6 +105,9 @@ class Settings:
         os.getenv("BOSS_PERMISSION_LOG_FILE", app_data_dir / "permission_events.jsonl")
     )
     event_log_file: Path = Path(os.getenv("BOSS_EVENT_LOG_FILE", app_data_dir / "events.jsonl"))
+    max_concurrent_workers: int = max(1, _env_int("BOSS_MAX_CONCURRENT_WORKERS", 3))
+    deploy_enabled: bool = _env_bool("BOSS_DEPLOY_ENABLED", False)
+    deploy_history_dir: Path = Path(os.getenv("BOSS_DEPLOY_HISTORY_DIR", app_data_dir / "deploys"))
 
 
 settings = Settings()
