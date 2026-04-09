@@ -546,6 +546,81 @@ class TestIOSDeliveryPipeline(unittest.TestCase):
             self.assertIn("No Xcode project", run.error)
             self.assertIsNotNone(run.finished_at)
 
+    def test_pipeline_upload_processing_stays_active(self):
+        """Full pipeline with testflight upload ending in PROCESSING stays non-terminal."""
+        from boss.ios_delivery.engine import create_run, run_full_pipeline
+        from boss.ios_delivery.runner import BuildResult
+        from boss.ios_delivery.state import (
+            DeliveryPhase, UploadMethod, UploadStatus, UploadTarget,
+            load_run, read_events,
+        )
+        from boss.ios_delivery.upload import UploadPlan, UploadResult, UploadStrategy
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _create_synthetic_xcode_project(root)
+
+            run = create_run(
+                str(root),
+                upload_target=UploadTarget.TESTFLIGHT.value,
+            )
+
+            mock_build = BuildResult(
+                command=["xcodebuild"], exit_code=0,
+                stdout="BUILD SUCCEEDED", stderr="", duration_ms=500.0, governed=False,
+            )
+
+            def _mock_run(cmd, *, cwd, timeout=600, run_id=None):
+                # Create archive dir for archive phase
+                archive_dir = Path(cwd) / "build" / "archives"
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                (archive_dir / "MyApp.xcarchive").mkdir(exist_ok=True)
+                # Create export dir with IPA for export phase
+                export_dir = Path(cwd) / "build" / "export"
+                export_dir.mkdir(parents=True, exist_ok=True)
+                (export_dir / "MyApp.ipa").write_bytes(b"fake-ipa")
+                return mock_build
+
+            mock_plan = UploadPlan(
+                strategy=UploadStrategy.XCRUN_ALTOOL,
+                command=["xcrun", "altool", "--upload-app"],
+                method=UploadMethod.XCRUN_ALTOOL,
+                description="test altool upload",
+                api_key_id="K1",
+            )
+            mock_upload_result = UploadResult(
+                success=True, exit_code=0,
+                stdout="No errors uploading.\nRequestUUID = UUID-PIPE",
+                stderr="", duration_ms=5000.0, governed=False, upload_id="UUID-PIPE",
+            )
+
+            with patch("boss.ios_delivery.runner.run_build_command", side_effect=_mock_run), \
+                 patch("boss.ios_delivery.upload.validate_upload_credentials", return_value=(True, "ok")), \
+                 patch("boss.ios_delivery.upload.resolve_upload_plan", return_value=mock_plan), \
+                 patch("boss.ios_delivery.upload.execute_upload", return_value=mock_upload_result):
+                run = run_full_pipeline(run)
+
+            # Upload succeeded but Apple is still processing — must stay active
+            self.assertEqual(run.phase, DeliveryPhase.UPLOADING.value)
+            self.assertEqual(run.upload_status, UploadStatus.PROCESSING.value)
+            self.assertFalse(run.is_terminal,
+                             "Processing upload must NOT be terminal after full pipeline")
+            self.assertEqual(run.upload_id, "UUID-PIPE")
+            self.assertIsNotNone(run.finished_at)
+
+            # Verify persisted state matches
+            reloaded = load_run(run.run_id)
+            self.assertIsNotNone(reloaded)
+            self.assertEqual(reloaded.phase, DeliveryPhase.UPLOADING.value)
+            self.assertEqual(reloaded.upload_status, UploadStatus.PROCESSING.value)
+            self.assertFalse(reloaded.is_terminal)
+
+            # Events should include upload lifecycle
+            events = read_events(run.run_id)
+            event_types = [e["type"] for e in events]
+            self.assertIn("upload_done", event_types)
+            self.assertIn("finished", event_types)
+
 
 # ── Toolchain model tests ──────────────────────────────────────────
 

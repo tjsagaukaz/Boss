@@ -677,6 +677,7 @@ def run_full_pipeline(run: IOSDeliveryRun) -> IOSDeliveryRun:
         DeliveryPhase.COMPLETED.value,
         DeliveryPhase.FAILED.value,
         DeliveryPhase.CANCELLED.value,
+        DeliveryPhase.UPLOADING.value,  # still processing on App Store Connect
     ):
         # Pipeline completed all phases without failure — mark done
         run.phase = DeliveryPhase.COMPLETED.value
