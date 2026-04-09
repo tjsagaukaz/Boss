@@ -2249,7 +2249,7 @@ class TestUploadArtifactEngine(unittest.TestCase):
              patch("boss.ios_delivery.upload.execute_upload", return_value=mock_result):
             run = upload_artifact(run)
 
-        self.assertEqual(run.phase, DeliveryPhase.COMPLETED.value)
+        self.assertEqual(run.phase, DeliveryPhase.UPLOADING.value)
         self.assertEqual(run.upload_status, UploadStatus.PROCESSING.value)
         self.assertEqual(run.upload_id, "UUID-123")
         self.assertEqual(run.upload_method, UploadMethod.XCRUN_ALTOOL.value)
@@ -2386,6 +2386,218 @@ class TestUploadArtifactEngine(unittest.TestCase):
         self.assertEqual(run.phase, DeliveryPhase.FAILED.value)
         self.assertEqual(run.upload_status, UploadStatus.FAILED.value)
         self.assertIn("denied", run.error.lower())
+
+
+# ════════════════════════════════════════════════════════════════════
+#  Upload integrity: runner governance, status persistence, active classification
+# ════════════════════════════════════════════════════════════════════
+
+
+class TestUploadIntegrityFixes(unittest.TestCase):
+    """Verify the three upload integrity fixes."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self._td_path = Path(self._td.name)
+        self._ctx = override_settings(app_data_dir=self._td_path)
+        self._ctx.__enter__()
+
+    def tearDown(self):
+        self._ctx.__exit__(None, None, None)
+        self._td.cleanup()
+
+    # ── Fix 1: Runner governance ──────────────────────────────────
+
+    def test_upload_endpoint_establishes_runner_context(self):
+        """POST /upload must call get_runner before upload_artifact."""
+        import ast
+        src = Path(__file__).resolve().parent.parent / "boss" / "api.py"
+        tree = ast.parse(src.read_text())
+        # Find the ios_delivery_start_upload function
+        func = None
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name == "ios_delivery_start_upload":
+                    func = node
+                    break
+        self.assertIsNotNone(func, "ios_delivery_start_upload function not found")
+        calls = []
+        for node in ast.walk(func):
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name):
+                    calls.append(node.func.id)
+                elif isinstance(node.func, ast.Attribute):
+                    calls.append(node.func.attr)
+        self.assertIn("get_runner", calls, "upload endpoint must call get_runner")
+        ri = calls.index("get_runner")
+        ui = calls.index("upload_artifact")
+        self.assertLess(ri, ui, "get_runner must be called before upload_artifact")
+
+    def test_upload_status_endpoint_establishes_runner_context(self):
+        """GET /upload-status must call get_runner before check_processing_status."""
+        import ast
+        src = Path(__file__).resolve().parent.parent / "boss" / "api.py"
+        tree = ast.parse(src.read_text())
+        func = None
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name == "ios_delivery_upload_status":
+                    func = node
+                    break
+        self.assertIsNotNone(func, "ios_delivery_upload_status function not found")
+        calls = []
+        for node in ast.walk(func):
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name):
+                    calls.append(node.func.id)
+                elif isinstance(node.func, ast.Attribute):
+                    calls.append(node.func.attr)
+        self.assertIn("get_runner", calls, "upload-status endpoint must call get_runner")
+        ri = calls.index("get_runner")
+        ci = calls.index("check_processing_status")
+        self.assertLess(ri, ci, "get_runner must be called before check_processing_status")
+
+    # ── Fix 2: Status persistence ─────────────────────────────────
+
+    def test_processing_to_ready_persists_transition(self):
+        """check_processing_status persists status when it transitions."""
+        from boss.ios_delivery.state import (
+            DeliveryPhase, IOSDeliveryRun, UploadMethod, UploadStatus,
+            new_run_id, save_run,
+        )
+        from boss.ios_delivery.upload import ProcessingStatus, check_processing_status
+
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path=str(self._td_path))
+        run.upload_status = UploadStatus.PROCESSING.value
+        run.upload_method = UploadMethod.FASTLANE_PILOT.value
+        run.phase = DeliveryPhase.UPLOADING.value
+        save_run(run)
+
+        # Mock _check_via_pilot to return READY
+        ready = ProcessingStatus(
+            status=UploadStatus.READY.value,
+            detail="Build processing complete",
+        )
+        with patch("boss.ios_delivery.upload._check_via_pilot", return_value=ready):
+            result = check_processing_status(run)
+
+        self.assertEqual(result.status, UploadStatus.READY.value)
+        # The run object itself should be updated
+        self.assertEqual(run.upload_status, UploadStatus.READY.value)
+        self.assertEqual(run.phase, DeliveryPhase.COMPLETED.value)
+        self.assertIsNotNone(run.upload_finished_at)
+
+        # Verify it was persisted to disk
+        from boss.ios_delivery.state import load_run
+        reloaded = load_run(run.run_id)
+        self.assertIsNotNone(reloaded)
+        self.assertEqual(reloaded.upload_status, UploadStatus.READY.value)
+        self.assertEqual(reloaded.phase, DeliveryPhase.COMPLETED.value)
+
+    def test_no_change_does_not_save(self):
+        """check_processing_status does not save when status unchanged."""
+        from boss.ios_delivery.state import (
+            IOSDeliveryRun, UploadMethod, UploadStatus, new_run_id,
+        )
+        from boss.ios_delivery.upload import ProcessingStatus, check_processing_status
+
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path=str(self._td_path))
+        run.upload_status = UploadStatus.PROCESSING.value
+        run.upload_method = UploadMethod.FASTLANE_PILOT.value
+
+        still_processing = ProcessingStatus(
+            status=UploadStatus.PROCESSING.value,
+            detail="Still processing",
+        )
+        with patch("boss.ios_delivery.upload._check_via_pilot", return_value=still_processing), \
+             patch("boss.ios_delivery.upload.save_run") as mock_save:
+            check_processing_status(run)
+            # _persist_status_transition should detect no change and skip save
+            mock_save.assert_not_called()
+
+    def test_altool_processing_persists_no_change(self):
+        """altool processing path does not spuriously save (status stays PROCESSING)."""
+        from boss.ios_delivery.state import (
+            IOSDeliveryRun, UploadMethod, UploadStatus, new_run_id,
+        )
+        from boss.ios_delivery.upload import check_processing_status
+
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path=str(self._td_path))
+        run.upload_status = UploadStatus.PROCESSING.value
+        run.upload_method = UploadMethod.XCRUN_ALTOOL.value
+
+        with patch("boss.ios_delivery.upload.save_run") as mock_save:
+            result = check_processing_status(run)
+            mock_save.assert_not_called()
+        self.assertEqual(result.status, UploadStatus.PROCESSING.value)
+
+    # ── Fix 3: Processing uploads stay active ─────────────────────
+
+    def test_processing_upload_phase_is_uploading(self):
+        """upload_artifact keeps phase=UPLOADING when upload_status=PROCESSING."""
+        from boss.ios_delivery.engine import upload_artifact
+        from boss.ios_delivery.state import (
+            DeliveryPhase, IOSDeliveryRun, UploadMethod, UploadStatus,
+            UploadTarget, new_run_id,
+        )
+        from boss.ios_delivery.upload import UploadPlan, UploadResult, UploadStrategy
+
+        ipa = self._td_path / "App.ipa"
+        ipa.write_bytes(b"fake-ipa")
+
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path=str(self._td_path))
+        run.upload_target = UploadTarget.TESTFLIGHT.value
+        run.ipa_path = str(ipa)
+
+        mock_plan = UploadPlan(
+            strategy=UploadStrategy.XCRUN_ALTOOL,
+            command=["xcrun", "altool"],
+            method=UploadMethod.XCRUN_ALTOOL,
+            description="test",
+        )
+        mock_result = UploadResult(
+            success=True, exit_code=0,
+            stdout="No errors uploading.\nRequestUUID = UUID-789",
+            stderr="", duration_ms=5000.0, governed=False, upload_id="UUID-789",
+        )
+
+        with patch("boss.ios_delivery.upload.validate_upload_credentials", return_value=(True, "ok")), \
+             patch("boss.ios_delivery.upload.resolve_upload_plan", return_value=mock_plan), \
+             patch("boss.ios_delivery.upload.execute_upload", return_value=mock_result):
+            run = upload_artifact(run)
+
+        self.assertEqual(run.phase, DeliveryPhase.UPLOADING.value)
+        self.assertEqual(run.upload_status, UploadStatus.PROCESSING.value)
+        self.assertFalse(run.is_terminal, "Processing upload must NOT be terminal")
+
+    def test_processing_upload_in_active_runs(self):
+        """delivery_status classifies processing uploads as active, not completed."""
+        from boss.ios_delivery.engine import delivery_status
+        from boss.ios_delivery.state import (
+            DeliveryPhase, IOSDeliveryRun, UploadStatus, new_run_id, save_run,
+        )
+
+        # A run that has uploaded but is still processing
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path=str(self._td_path))
+        run.phase = DeliveryPhase.UPLOADING.value
+        run.upload_status = UploadStatus.PROCESSING.value
+        save_run(run)
+
+        status = delivery_status()
+        active_ids = [r["run_id"] for r in status["active_runs"]]
+        completed_ids = [r["run_id"] for r in status["recent_completed"]]
+        self.assertIn(run.run_id, active_ids)
+        self.assertNotIn(run.run_id, completed_ids)
+
+    def test_ready_upload_is_terminal(self):
+        """A run with upload_status=READY and phase=COMPLETED is terminal."""
+        from boss.ios_delivery.state import (
+            DeliveryPhase, IOSDeliveryRun, UploadStatus, new_run_id,
+        )
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path=str(self._td_path))
+        run.phase = DeliveryPhase.COMPLETED.value
+        run.upload_status = UploadStatus.READY.value
+        self.assertTrue(run.is_terminal)
 
 
 if __name__ == "__main__":

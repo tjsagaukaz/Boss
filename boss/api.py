@@ -2951,6 +2951,8 @@ async def ios_delivery_start_upload(run_id: str):
     """
     from boss.ios_delivery.engine import upload_artifact
     from boss.ios_delivery.state import UploadTarget, load_run
+    from boss.runner.engine import get_runner
+
     run = load_run(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="iOS delivery run not found")
@@ -2958,6 +2960,10 @@ async def ios_delivery_start_upload(run_id: str):
         raise HTTPException(status_code=400, detail="Run has no IPA — export must complete first")
     if run.upload_target == UploadTarget.NONE.value:
         raise HTTPException(status_code=400, detail="Run has no upload target configured")
+
+    # Establish runner context so upload subprocess goes through governance
+    get_runner(mode="agent", workspace_root=run.project_path)
+
     run = upload_artifact(run)
     return run.to_dict()
 
@@ -2967,8 +2973,14 @@ async def ios_delivery_upload_status(run_id: str):
     """Check the processing status of an uploaded build."""
     from boss.ios_delivery.state import load_run
     from boss.ios_delivery.upload import check_processing_status
+    from boss.runner.engine import get_runner
+
     run = load_run(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="iOS delivery run not found")
+
+    # Establish runner context so pilot status query goes through governance
+    get_runner(mode="agent", workspace_root=run.project_path)
+
     status = check_processing_status(run)
     return status.to_dict()

@@ -636,9 +636,11 @@ def upload_artifact(run: IOSDeliveryRun) -> IOSDeliveryRun:
         run.upload_status = UploadStatus.READY.value
         run.phase = DeliveryPhase.COMPLETED.value
     else:
-        # Uploaded but processing not yet confirmed
+        # Uploaded but processing not yet confirmed — keep phase as
+        # UPLOADING so the run stays in active_runs until processing
+        # completes.  Only move to COMPLETED when we confirm readiness.
         run.upload_status = UploadStatus.PROCESSING.value
-        run.phase = DeliveryPhase.COMPLETED.value
+        run.phase = DeliveryPhase.UPLOADING.value
 
     append_event(
         run.run_id,

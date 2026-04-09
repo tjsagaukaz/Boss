@@ -20,6 +20,7 @@ with EXTERNAL execution type semantics, separate from local build steps.
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import os
@@ -286,6 +287,9 @@ def check_processing_status(run: IOSDeliveryRun) -> ProcessingStatus:
 
     Uses fastlane pilot if available, otherwise reports based on
     known state only (altool doesn't have a processing query).
+
+    When the check reveals a status transition (e.g. processing → ready),
+    the run record is updated and persisted so the change is durable.
     """
     if run.upload_status == UploadStatus.NOT_STARTED.value:
         return ProcessingStatus(
@@ -314,9 +318,9 @@ def check_processing_status(run: IOSDeliveryRun) -> ProcessingStatus:
         # If we used fastlane pilot and it completed, the upload itself
         # waited for processing.  Otherwise we can try to query.
         if run.upload_method == UploadMethod.FASTLANE_PILOT.value:
-            return _check_via_pilot(run)
+            result = _check_via_pilot(run)
         else:
-            return ProcessingStatus(
+            result = ProcessingStatus(
                 status=UploadStatus.PROCESSING.value,
                 detail=(
                     "Build uploaded via altool. Check App Store Connect "
@@ -325,10 +329,40 @@ def check_processing_status(run: IOSDeliveryRun) -> ProcessingStatus:
                 ),
             )
 
+        # Persist any status transition discovered by the check
+        _persist_status_transition(run, result)
+        return result
+
     return ProcessingStatus(
         status=run.upload_status,
         detail=f"Upload status: {run.upload_status}",
     )
+
+
+def _persist_status_transition(
+    run: IOSDeliveryRun, result: ProcessingStatus
+) -> None:
+    """Update and save the run if the processing check found a new status."""
+    from boss.ios_delivery.state import DeliveryPhase, save_run
+
+    if result.status == run.upload_status:
+        return  # no change
+
+    old_status = run.upload_status
+    run.upload_status = result.status
+
+    # When processing completes, mark the delivery run as truly finished
+    if result.status == UploadStatus.READY.value:
+        run.phase = DeliveryPhase.COMPLETED.value
+        run.upload_finished_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    append_event(
+        run.run_id,
+        event_type="upload_status_transition",
+        message=f"Upload status changed from {old_status} to {result.status}",
+        payload={"from": old_status, "to": result.status},
+    )
+    save_run(run)
 
 
 def _check_via_pilot(run: IOSDeliveryRun) -> ProcessingStatus:
