@@ -1,4 +1,15 @@
-from __future__ import annotations
+"""Web search tool — governed Boss-native wrapper around the OpenAI web search API.
+
+This uses a governed_function_tool with ExecutionType.EXTERNAL so that web
+searches require approval through the Boss permission model.  The SDK's
+built-in WebSearchTool was evaluated but intentionally not adopted because
+it bypasses Boss governance (no needs_approval, no scope tracking, no
+permission rule integration).
+
+TODO: if the SDK adds a governed/approval-aware hosted tool surface in a
+future release, re-evaluate whether to adopt it while preserving approval
+and observability behavior.
+"""
 
 from boss.config import settings
 from boss.execution import ExecutionType, governed_function_tool, web_scope_key, web_scope_label

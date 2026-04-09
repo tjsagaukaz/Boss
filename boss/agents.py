@@ -1,3 +1,20 @@
+"""Agent construction — builds the Boss runtime agent graph.
+
+Runtime topology (simplified):
+- **boss**: the single primary agent with the full tool surface
+  (memory, filesystem, code intelligence, action, web search, iOS, preview).
+- **mac**: macOS system automation specialist (AppleScript, clipboard,
+  notifications, screenshots, file search).
+
+Review mode uses the same boss agent with read-only tool filtering and
+review-specific instructions.  A separate ``build_review_agent`` is
+available for structured review workflows that need typed output.
+
+Retired agents (research, reasoning, code) are collapsed into the
+primary boss agent.  Their capabilities live as direct tools instead of
+conversational handoffs.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,15 +27,9 @@ from boss.config import settings
 from boss.control import load_boss_control
 from boss.execution import AUTO_ALLOWED_EXECUTION_TYPES, get_tool_metadata
 from boss.guardrails.safety import safety_check
-from boss.tools.mac import (
-    get_clipboard,
-    open_app,
-    run_applescript,
-    screenshot,
-    search_files,
-    send_notification,
-    set_clipboard,
-)
+from boss.tools.action import edit_file, run_shell, write_file
+from boss.tools.filesystem import grep_codebase, list_directory
+from boss.tools.filesystem import read_file as fs_read_file
 from boss.tools.intelligence import (
     find_definition,
     find_importers,
@@ -27,17 +38,21 @@ from boss.tools.intelligence import (
     search_code_semantic,
     search_code_symbolic,
 )
-from boss.tools.filesystem import (
-    grep_codebase,
-    list_directory,
-    read_file,
-)
 from boss.tools.ios import (
     inspect_xcode_project,
     ios_delivery_status,
     list_xcode_schemes,
     start_ios_delivery,
     summarize_ios_project,
+)
+from boss.tools.mac import (
+    get_clipboard,
+    open_app,
+    run_applescript,
+    screenshot,
+    search_files,
+    send_notification,
+    set_clipboard,
 )
 from boss.tools.memory import (
     get_project_details,
@@ -57,6 +72,8 @@ from boss.tools.research import web_search
 
 set_tracing_disabled(not settings.tracing_enabled)
 
+
+# ── Work mode policy ────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class WorkModePolicy:
@@ -78,6 +95,7 @@ def _mode_policy(mode: str) -> WorkModePolicy:
 
 
 def _filter_tools(tools: list[object], *, policy: WorkModePolicy) -> list[object]:
+    """Filter tools to those allowed by the current work mode policy."""
     if policy.allow_restricted_tools and policy.allow_external_tools:
         return tools
 
@@ -123,42 +141,60 @@ def _build_instructions(
     )
 
 
+# ── Primary tool lists ──────────────────────────────────────────────
+
+# The full Boss tool surface — everything the primary agent can use.
+_BOSS_TOOLS = [
+    # Memory
+    remember, recall, list_known_projects, get_project_details,
+    search_project_content, memory_stats,
+    # Filesystem (read)
+    fs_read_file, list_directory, grep_codebase,
+    # Filesystem (write) — filtered out in read-only modes
+    write_file, edit_file,
+    # Shell — filtered out in read-only modes
+    run_shell,
+    # Code intelligence
+    find_symbol, find_definition, search_code_symbolic,
+    search_code_semantic, project_graph, find_importers,
+    # iOS / Xcode
+    inspect_xcode_project, list_xcode_schemes, summarize_ios_project,
+    start_ios_delivery, ios_delivery_status,
+    # Preview
+    start_preview_server, stop_preview_server,
+    capture_preview, preview_status_tool,
+    # Web search (external) — filtered out when no API key
+    web_search,
+]
+
+_MAC_TOOLS = [
+    open_app, run_applescript, search_files,
+    get_clipboard, set_clipboard, send_notification, screenshot,
+]
+
+
+# ── Agent builders ──────────────────────────────────────────────────
+
 def build_entry_agent(
     *,
     active_mcp_servers: dict[str, object] | None = None,
     mode: str | None = None,
     workspace_root: Path | None = None,
 ) -> Agent:
+    """Build the Boss runtime agent graph.
+
+    Returns the primary boss agent with a mac specialist handoff.
+    """
     active_mcp_servers = active_mcp_servers or {}
     control = load_boss_control(workspace_root)
     resolved_mode = mode or control.config.default_mode
     policy = _mode_policy(resolved_mode)
-
-    mac_tools = _filter_tools(
-        [open_app, run_applescript, search_files, get_clipboard, set_clipboard, send_notification, screenshot],
-        policy=policy,
-    )
-    research_tools = _filter_tools([web_search], policy=policy) if settings.cloud_api_key else []
-    general_tools = _filter_tools(
-        [remember, recall, list_known_projects, get_project_details, search_project_content, memory_stats,
-         read_file, list_directory, grep_codebase,
-         find_symbol, find_definition, search_code_symbolic, search_code_semantic, project_graph, find_importers,
-         inspect_xcode_project, list_xcode_schemes, summarize_ios_project,
-         start_ios_delivery, ios_delivery_status,
-         start_preview_server, stop_preview_server, capture_preview, preview_status_tool],
-        policy=policy,
-    )
-    code_tools = _filter_tools(
-        [recall, list_known_projects, get_project_details, search_project_content,
-         read_file, list_directory, grep_codebase,
-         find_symbol, find_definition, search_code_symbolic, search_code_semantic, project_graph, find_importers,
-         inspect_xcode_project, list_xcode_schemes, summarize_ios_project,
-         start_ios_delivery, ios_delivery_status,
-         start_preview_server, stop_preview_server, capture_preview, preview_status_tool],
-        policy=policy,
-    )
-
     ws = control.root
+
+    # Filter tools for the current mode
+    boss_tools_raw = _BOSS_TOOLS if settings.cloud_api_key else [t for t in _BOSS_TOOLS if t is not web_search]
+    boss_tools = _filter_tools(boss_tools_raw, policy=policy)
+    mac_tools = _filter_tools(_MAC_TOOLS, policy=policy)
 
     mac_agent = Agent(
         name="mac",
@@ -174,62 +210,39 @@ def build_entry_agent(
         ] if policy.allow_mcp_servers else [],
     )
 
-    research_agent = Agent(
-        name="research",
-        model=settings.research_model,
-        instructions=_build_instructions(
-            agent_name="research", mode=resolved_mode, workspace_root=ws,
-        ),
-        tools=research_tools,
-    )
-
-    reasoning_agent = Agent(
-        name="reasoning",
-        model=settings.reasoning_model,
-        instructions=_build_instructions(
-            agent_name="reasoning", mode=resolved_mode, workspace_root=ws,
-        ),
-    )
-
-    code_agent = Agent(
-        name="code",
-        model=settings.code_model,
-        instructions=_build_instructions(
-            agent_name="code", mode=resolved_mode, workspace_root=ws,
-        ),
-        tools=code_tools,
-    )
-
-    # General is the actual entry point. It answers directly when it can
-    # and hands off to specialists only when a narrower toolset is useful.
-    # In review/audit mode, use the full model for deeper analysis.
+    # In review mode use the full code model for deeper analysis.
     entry_model = settings.code_model if resolved_mode == "review" else settings.general_model
 
     return Agent(
-        name="general",
+        name="boss",
         model=entry_model,
         instructions=_build_instructions(
-            agent_name="general",
+            agent_name="boss",
             mode=resolved_mode,
             workspace_root=ws,
-            tool_names=_tool_names(general_tools),
+            tool_names=_tool_names(boss_tools),
         ),
-        tools=general_tools,
-        handoffs=[mac_agent, research_agent, reasoning_agent, code_agent],
+        tools=boss_tools,
+        handoffs=[mac_agent],
         input_guardrails=[safety_check],
         mcp_servers=[active_mcp_servers["memory"]] if policy.allow_mcp_servers and "memory" in active_mcp_servers else [],
     )
 
 
 def build_review_agent(*, output_type: type[Any], workspace_root: Path | None = None) -> Agent:
+    """Build a structured review agent with typed output.
+
+    Used by the review workflow endpoint for machine-readable findings.
+    """
     control = load_boss_control(workspace_root)
     policy = _mode_policy("review")
     review_tools = _filter_tools(
-        [recall, list_known_projects, get_project_details, search_project_content, memory_stats],
+        [recall, list_known_projects, get_project_details, search_project_content,
+         memory_stats, fs_read_file, list_directory, grep_codebase],
         policy=policy,
     )
     instructions = _build_instructions(
-        agent_name="code",
+        agent_name="boss",
         mode="review",
         workspace_root=control.root,
     )
@@ -242,4 +255,5 @@ def build_review_agent(*, output_type: type[Any], workspace_root: Path | None = 
     )
 
 
+# Default entry agent (built at import time for backward compat).
 entry_agent = build_entry_agent()

@@ -101,9 +101,7 @@ class RegressionHarnessTests(unittest.TestCase):
 
         tool_names = [tool.name for tool in entry_agent.tools]
         self.assertIn("remember", tool_names)
-
-        research_agent = next(agent for agent in entry_agent.handoffs if agent.name == "research")
-        self.assertIn("web_search", [tool.name for tool in research_agent.tools])
+        self.assertIn("web_search", tool_names)
 
     def test_ask_mode_filters_side_effect_tools(self):
         entry_agent = build_entry_agent(mode="ask")
@@ -122,9 +120,7 @@ class RegressionHarnessTests(unittest.TestCase):
 
         self.assertIn("Goal, Execution Plan, Risks, Validation", entry_agent.instructions)
         self.assertNotIn("remember", [tool.name for tool in entry_agent.tools])
-
-        research_agent = next(agent for agent in entry_agent.handoffs if agent.name == "research")
-        self.assertEqual([tool.name for tool in research_agent.tools], [])
+        self.assertNotIn("web_search", [tool.name for tool in entry_agent.tools])
 
     def test_review_mode_is_read_only_and_findings_first(self):
         entry_agent = build_entry_agent(mode="review")
@@ -132,9 +128,9 @@ class RegressionHarnessTests(unittest.TestCase):
         self.assertIn("Do not fix code", entry_agent.instructions)
         self.assertNotIn("remember", [tool.name for tool in entry_agent.tools])
 
-        code_agent = next(agent for agent in entry_agent.handoffs if agent.name == "code")
-        self.assertIn("code reviewer", code_agent.instructions.lower())
-        for tool in [*entry_agent.tools, *code_agent.tools]:
+        # Primary boss agent in review mode should have review instructions
+        self.assertIn("review", entry_agent.instructions.lower())
+        for tool in entry_agent.tools:
             metadata = get_tool_metadata(tool.name)
             self.assertIsNotNone(metadata)
             self.assertIn(metadata.execution_type, AUTO_ALLOWED_EXECUTION_TYPES)
@@ -605,16 +601,20 @@ class RegressionHarnessTests(unittest.TestCase):
             self.assertFalse(is_path_allowed_for_agent(secret))
             self.assertTrue(is_path_allowed_for_agent(public))
 
-    def test_entry_agent_uses_general_entrypoint_and_expected_handoffs(self):
+    def test_entry_agent_uses_boss_entrypoint_and_mac_handoff(self):
         entry_agent = build_entry_agent(active_mcp_servers={})
 
-        self.assertEqual(entry_agent.name, "general")
-        self.assertEqual([agent.name for agent in entry_agent.handoffs], ["mac", "research", "reasoning", "code"])
+        self.assertEqual(entry_agent.name, "boss")
+        self.assertEqual([agent.name for agent in entry_agent.handoffs], ["mac"])
 
         tool_names = [tool.name for tool in entry_agent.tools]
         self.assertIn("remember", tool_names)
         self.assertIn("recall", tool_names)
         self.assertIn("search_project_content", tool_names)
+        # Action tools present in agent mode
+        self.assertIn("write_file", tool_names)
+        self.assertIn("edit_file", tool_names)
+        self.assertIn("run_shell", tool_names)
 
     def test_memory_round_trip_and_injection_relevance(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2514,11 +2514,14 @@ class TestIntelligenceToolsRegistered(unittest.TestCase):
             metadata = get_tool_metadata(name)
             self.assertIsNotNone(metadata, f"Tool '{name}' should be registered")
 
-    def test_tools_in_code_agent(self):
+    def test_tools_in_boss_agent(self):
         agent = build_entry_agent(mode="agent")
-        # The code agent should be accessible via handoffs
-        handoff_names = {h.agent.name if hasattr(h, 'agent') else getattr(h, 'name', '') for h in (agent.handoffs or [])}
-        self.assertIn("code", handoff_names)
+        # The boss agent should have action tools directly
+        tool_names = {tool.name for tool in agent.tools}
+        self.assertIn("write_file", tool_names)
+        self.assertIn("edit_file", tool_names)
+        self.assertIn("run_shell", tool_names)
+        self.assertIn("read_file", tool_names)
 
     def test_find_symbol_search_type(self):
         from boss.execution import ExecutionType

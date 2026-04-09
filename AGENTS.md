@@ -6,9 +6,10 @@ This repository is a local-first personal agent split between a Python backend a
 
 - `boss/`: Python backend runtime.
 - `boss/api.py`: FastAPI surface for chat, permissions, memory, and system status.
-- `boss/agents.py`: agent graph, model selection, handoffs, and tracing toggle.
+- `boss/agents.py`: agent graph — primary boss agent + mac specialist, model selection, tracing toggle.
 - `boss/execution.py`: governed tool metadata, permission rules, pending approvals, and resume state.
-- `boss/tools/`: local tools for macOS actions, memory, and research.
+- `boss/tools/`: local tools — filesystem, action (write/edit/shell), macOS, memory, research, intelligence.
+- `boss/tools/action.py`: governed write_file, edit_file, run_shell built on Boss runner/policy.
 - `boss/memory/`: SQLite-backed knowledge store and system/project scanning.
 - `boss/persistence/`: conversation history persistence.
 - `boss/ios_delivery/`: iOS archive, export, sign, and TestFlight upload pipeline.

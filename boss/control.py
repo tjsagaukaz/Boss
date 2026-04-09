@@ -539,16 +539,16 @@ def _to_relative_posix(path: str | Path, root: Path) -> str | None:
 
 def _agent_targets(agent_name: str) -> tuple[str, ...]:
     normalized = agent_name.strip().lower()
+    if normalized == "boss":
+        # Primary agent matches "boss", "general" (backward compat),
+        # and code-related targets.
+        return ("boss", "general", "code", "backend-python", "macos-client")
     if normalized == "code":
         return ("code", "backend-python", "macos-client")
     if normalized == "general":
-        return ("general",)
+        return ("general", "boss")
     if normalized == "mac":
         return ("mac",)
-    if normalized == "research":
-        return ("research",)
-    if normalized == "reasoning":
-        return ("reasoning",)
     return (normalized,)
 
 

@@ -139,8 +139,8 @@ class PromptBuilder:
 
         # 3. Role identity
         role_text = role_instructions(self._agent_name, self._mode)
-        if self._agent_name == "general":
-            # Append tool hints and handoff hints for the general agent
+        if self._agent_name in ("boss", "general"):
+            # Append tool hints and handoff hints for the primary agent
             extra_parts = [role_text]
             if self._tool_names:
                 extra_parts.append(general_tool_hints(self._tool_names))

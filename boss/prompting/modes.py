@@ -2,8 +2,9 @@
 
 Each work mode (ask, plan, agent, review) defines constraints that
 override or extend the core operating instructions.  Each agent role
-(general, mac, research, reasoning, code) has a one-line identity
-sentence layered on top.
+(boss, mac) has an identity sentence layered on top.
+
+Simplified topology: one primary boss agent + one mac specialist.
 """
 
 from __future__ import annotations
@@ -43,25 +44,24 @@ MODE_INSTRUCTIONS: dict[str, str] = {
 # ── Role identity sentences ─────────────────────────────────────────
 
 ROLE_INSTRUCTIONS: dict[str, str] = {
+    "boss": (
+        "You are Boss, the primary personal AI agent. You can read, "
+        "search, edit files, run shell commands, search the web, and "
+        "manage memory — all through governed tools that enforce "
+        "approval when needed. Hand off to the mac specialist only for "
+        "macOS system automation (AppleScript, clipboard, screenshots)."
+    ),
+    # Keep "general" as alias for backward compat with any config/test
+    # that still references the old name.
     "general": (
-        "You are the primary Boss agent. Answer directly when you can. "
-        "Hand off to a specialist only when a narrower toolset is "
-        "clearly needed."
+        "You are Boss, the primary personal AI agent. You can read, "
+        "search, edit files, run shell commands, search the web, and "
+        "manage memory — all through governed tools that enforce "
+        "approval when needed. Hand off to the mac specialist only for "
+        "macOS system automation (AppleScript, clipboard, screenshots)."
     ),
     "mac": (
         "You are a macOS automation specialist within Boss."
-    ),
-    "research": (
-        "You are a research specialist within Boss. Use web search only "
-        "when current or external information is genuinely required."
-    ),
-    "reasoning": (
-        "You are an expert analyst within Boss. Break down complex "
-        "problems step by step."
-    ),
-    "code": (
-        "You are an expert programmer within Boss. Write clean, correct "
-        "code. Explore the codebase before making changes."
     ),
 }
 
@@ -69,8 +69,8 @@ ROLE_INSTRUCTIONS: dict[str, str] = {
 # When present, these replace the default ROLE_INSTRUCTIONS entry for
 # the given mode.
 _ROLE_MODE_OVERRIDES: dict[tuple[str, str], str] = {
-    ("review", "code"): (
-        "You are a code reviewer within Boss. Stay read-only and do not "
+    ("review", "boss"): (
+        "You are Boss in code review mode. Stay read-only and do not "
         "auto-fix code.\n\n"
         "When you receive an audit or review request, immediately start "
         "reading files. Use list_directory to map the project structure, "
@@ -80,18 +80,13 @@ _ROLE_MODE_OVERRIDES: dict[tuple[str, str], str] = {
         "you go. The user should see your tool calls and findings "
         "streaming in real time."
     ),
-    ("review", "reasoning"): (
-        "You are a review analyst within Boss. Lead with findings and "
-        "reasoning, not with solution steps."
+    ("ask", "boss"): (
+        "You are Boss in read-only mode. Inspect and explain, but do "
+        "not modify files or run commands."
     ),
-    ("ask", "code"): (
-        "You are a read-only code assistant within Boss. Inspect and "
-        "explain code, but do not modify files."
-    ),
-    ("plan", "code"): (
-        "You are a code planning assistant within Boss. Inspect the "
-        "codebase and return a concrete execution plan without changing "
-        "anything."
+    ("plan", "boss"): (
+        "You are Boss in planning mode. Inspect the codebase and return "
+        "a concrete execution plan without changing anything."
     ),
 }
 
@@ -104,11 +99,13 @@ def role_instructions(agent_name: str, mode: str) -> str:
     return ROLE_INSTRUCTIONS.get(agent_name, "")
 
 
-# ── Memory / tool surface hints for the general agent ───────────────
+# ── Tool surface hints for the boss agent ───────────────────────────
 
 def general_tool_hints(tool_names: set[str]) -> str:
-    """Build a short block describing available memory and search tools."""
+    """Build a short block describing available tools for the boss agent."""
     lines = ["Available tools (use as needed):"]
+
+    # Memory
     lines.append("- 'recall': look up what you know about the user")
     if "remember" in tool_names:
         lines.append("- 'remember': store important facts the user shares")
@@ -117,6 +114,19 @@ def general_tool_hints(tool_names: set[str]) -> str:
         "- 'search_project_content': search local project files, "
         "code structure, or entry points"
     )
+
+    # Filesystem
+    if "read_file" in tool_names:
+        lines.append("- 'read_file': read a file's contents with line numbers")
+        lines.append("- 'list_directory': list files and folders in a directory")
+        lines.append("- 'grep_codebase': search for text patterns across files")
+    if "write_file" in tool_names:
+        lines.append("- 'write_file': create or overwrite a file (requires approval)")
+        lines.append("- 'edit_file': targeted string replacement in a file (requires approval)")
+    if "run_shell" in tool_names:
+        lines.append("- 'run_shell': run a shell command through policy enforcement (requires approval)")
+
+    # Code intelligence
     if "find_symbol" in tool_names:
         lines.append(
             "- 'find_symbol' / 'find_definition': locate code symbols by name"
@@ -128,6 +138,15 @@ def general_tool_hints(tool_names: set[str]) -> str:
         lines.append(
             "- 'project_graph': structural overview of a project's code"
         )
+
+    # Web search
+    if "web_search" in tool_names:
+        lines.append(
+            "- 'web_search': search the web for current information "
+            "(requires approval)"
+        )
+
+    # iOS
     if "start_ios_delivery" in tool_names:
         lines.append(
             "- 'inspect_xcode_project' / 'list_xcode_schemes' / "
@@ -146,21 +165,14 @@ def general_tool_hints(tool_names: set[str]) -> str:
             "'summarize_ios_project': inspect iOS/Xcode project structure "
             "(read-only in this mode)"
         )
+
     return "\n".join(lines)
 
 
 def specialist_handoff_hints() -> str:
-    """One-line descriptions of specialist agents available for handoff."""
+    """One-line description of the mac specialist handoff."""
     return (
-        "Specialist handoffs (use only when clearly needed):\n"
-        "- code: codebase audits, code review, debugging, refactoring, "
-        "architecture analysis, file reading, directory listing, grep. "
-        "Prefer this agent for any task involving reading or modifying code.\n"
-        "- reasoning: complex multi-step analysis, planning, trade-off "
-        "evaluation, problem decomposition\n"
-        "- research: web search for external/current information (docs, "
-        "articles, APIs, versions). Only use when the answer requires "
-        "information beyond the local codebase.\n"
+        "Specialist handoff (use only when clearly needed):\n"
         "- mac: macOS system automation, AppleScript, clipboard, "
         "screenshots, file search, notifications"
     )

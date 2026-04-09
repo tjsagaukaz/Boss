@@ -2337,11 +2337,10 @@ async def system_status():
         "app_version": runtime["app_version"],
         "build_marker": runtime["build_marker"],
         "models": {
-            "general": settings.general_model,
+            "boss": settings.general_model,
+            "boss_review": settings.code_model,
             "mac": settings.mac_model,
-            "research": settings.research_model,
-            "reasoning": settings.reasoning_model,
-            "code": settings.code_model,
+            "web_search": settings.research_model,
             "guardrail": settings.guardrail_model,
         },
         "dependencies": dependency_availability(),
@@ -2378,7 +2377,7 @@ async def system_status():
 
 
 @app.get("/api/system/prompt-diagnostics")
-async def prompt_diagnostics(mode: str = "agent", agent_name: str = "general", task_hint: str | None = None):
+async def prompt_diagnostics(mode: str = "agent", agent_name: str = "boss", task_hint: str | None = None):
     """Inspect the layered prompt that would be assembled for a given mode and agent."""
     from boss.prompting.builder import PromptBuilder
     result = (

@@ -284,7 +284,7 @@ class TestOutputDiscipline(unittest.TestCase):
         self.assertIn("Do not emit planning chatter", CORE_OPERATING)
 
     def test_no_progress_updates(self):
-        self.assertIn("Do not emit progress updates", CORE_OPERATING)
+        self.assertIn("do not emit progress updates", CORE_OPERATING)
 
     def test_concise_directive(self):
         self.assertIn("Be concise", CORE_OPERATING)
@@ -537,16 +537,16 @@ class TestPromptRegressions(unittest.TestCase):
         self.assertIn("full", result.text.lower())
         self.assertIn("Mode: agent", result.text)
 
-    def test_code_reviewer_role_in_review_mode(self):
-        """code agent in review mode should identify as reviewer, not programmer."""
-        result = PromptBuilder(mode="review", agent_name="code").build()
-        self.assertIn("code reviewer", result.text.lower())
+    def test_boss_reviewer_role_in_review_mode(self):
+        """boss agent in review mode should identify as reviewer, not programmer."""
+        result = PromptBuilder(mode="review", agent_name="boss").build()
+        self.assertIn("code review", result.text.lower())
         self.assertNotIn("expert programmer", result.text.lower())
 
-    def test_code_role_in_agent_mode(self):
-        """code agent in agent mode should identify as programmer."""
-        result = PromptBuilder(mode="agent", agent_name="code").build()
-        self.assertIn("expert programmer", result.text.lower())
+    def test_boss_role_in_agent_mode(self):
+        """boss agent in agent mode should have full governed tool access."""
+        result = PromptBuilder(mode="agent", agent_name="boss").build()
+        self.assertIn("governed tools", result.text.lower())
 
     def test_memory_injection_never_in_durable_prompt(self):
         """Memory injection must stay in transient context, not durable instructions."""
