@@ -294,17 +294,19 @@ def build_altool_upload_command(
     ipa_path: str,
     api_key: str,
     api_issuer: str,
+    api_key_path: str | None = None,
     extra_args: list[str] | None = None,
 ) -> list[str]:
     """Construct an ``xcrun altool --upload-app`` command with API key auth.
 
     Apple's official upload tool, available with every Xcode install.
     Uses ``--apiKey`` and ``--apiIssuer`` for App Store Connect API auth.
-    The API key .p8 file must be in one of:
-      - ./private_keys/
-      - ~/private_keys/
-      - ~/.private_keys/
-      - ~/.appstoreconnect/private_keys/
+
+    When *api_key_path* is provided it is passed as ``--apiKeyPath`` so
+    altool can locate the ``.p8`` file directly instead of searching
+    its default directories (``./private_keys/``, ``~/private_keys/``,
+    ``~/.private_keys/``, ``~/.appstoreconnect/private_keys/``).
+    The value should be the **directory** containing the key file.
     """
     cmd = [
         "xcrun", "altool",
@@ -314,6 +316,8 @@ def build_altool_upload_command(
         "--apiKey", api_key,
         "--apiIssuer", api_issuer,
     ]
+    if api_key_path:
+        cmd.extend(["--apiKeyPath", api_key_path])
     if extra_args:
         cmd.extend(extra_args)
     return cmd

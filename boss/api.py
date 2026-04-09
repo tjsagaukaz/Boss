@@ -2961,8 +2961,11 @@ async def ios_delivery_start_upload(run_id: str):
     if run.upload_target == UploadTarget.NONE.value:
         raise HTTPException(status_code=400, detail="Run has no upload target configured")
 
-    # Establish runner context so upload subprocess goes through governance
-    get_runner(mode="agent", workspace_root=run.project_path)
+    # Establish runner context so upload subprocess goes through governance.
+    # Use deploy mode — uploads are external actions (App Store Connect),
+    # not workspace edits, so they need FULL_ACCESS rather than
+    # WORKSPACE_WRITE which does not allow xcrun/fastlane prefixes.
+    get_runner(mode="deploy", workspace_root=run.project_path)
 
     run = upload_artifact(run)
     return run.to_dict()
@@ -2979,8 +2982,9 @@ async def ios_delivery_upload_status(run_id: str):
     if run is None:
         raise HTTPException(status_code=404, detail="iOS delivery run not found")
 
-    # Establish runner context so pilot status query goes through governance
-    get_runner(mode="agent", workspace_root=run.project_path)
+    # Establish runner context so pilot status query goes through governance.
+    # Deploy mode — querying App Store Connect is an external action.
+    get_runner(mode="deploy", workspace_root=run.project_path)
 
     status = check_processing_status(run)
     return status.to_dict()

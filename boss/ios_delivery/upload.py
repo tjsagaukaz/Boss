@@ -20,7 +20,6 @@ with EXTERNAL execution type semantics, separate from local build steps.
 
 from __future__ import annotations
 
-import datetime
 import json
 import logging
 import os
@@ -184,10 +183,18 @@ def resolve_upload_plan(run: IOSDeliveryRun) -> UploadPlan | None:
 
     # Strategy 2: xcrun altool with API key
     if toolchain.xcrun.available:
+        # Derive the directory containing the .p8 so altool can find it
+        # without requiring the user to stage it in Apple's default dirs.
+        key_dir: str | None = None
+        if config.api_key.key_path:
+            _kp = Path(config.api_key.key_path)
+            if _kp.is_file():
+                key_dir = str(_kp.parent)
         cmd = build_altool_upload_command(
             ipa_path=run.ipa_path,
             api_key=config.api_key.key_id,
             api_issuer=config.api_key.issuer_id,
+            api_key_path=key_dir,
         )
         return UploadPlan(
             strategy=UploadStrategy.XCRUN_ALTOOL,
@@ -354,7 +361,7 @@ def _persist_status_transition(
     # When processing completes, mark the delivery run as truly finished
     if result.status == UploadStatus.READY.value:
         run.phase = DeliveryPhase.COMPLETED.value
-        run.upload_finished_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        run.upload_finished_at = time.time()
 
     append_event(
         run.run_id,

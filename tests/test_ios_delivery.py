@@ -1717,6 +1717,29 @@ class TestUploadCommandConstruction(unittest.TestCase):
         self.assertIn("--output-format", cmd)
         self.assertIn("json", cmd)
 
+    def test_altool_upload_with_api_key_path(self):
+        """--apiKeyPath is included when api_key_path is provided."""
+        from boss.ios_delivery.toolchain import build_altool_upload_command
+        cmd = build_altool_upload_command(
+            ipa_path="/build/App.ipa",
+            api_key="ABC123",
+            api_issuer="ISSUER-UUID",
+            api_key_path="/home/user/keys",
+        )
+        self.assertIn("--apiKeyPath", cmd)
+        idx = cmd.index("--apiKeyPath")
+        self.assertEqual(cmd[idx + 1], "/home/user/keys")
+
+    def test_altool_upload_without_api_key_path(self):
+        """--apiKeyPath is omitted when api_key_path is None."""
+        from boss.ios_delivery.toolchain import build_altool_upload_command
+        cmd = build_altool_upload_command(
+            ipa_path="/build/App.ipa",
+            api_key="ABC123",
+            api_issuer="ISSUER-UUID",
+        )
+        self.assertNotIn("--apiKeyPath", cmd)
+
     def test_pilot_builds_command(self):
         from boss.ios_delivery.toolchain import build_pilot_builds_command
         cmd = build_pilot_builds_command(
@@ -1989,6 +2012,61 @@ class TestUploadStrategyResolution(unittest.TestCase):
             plan = resolve_upload_plan(run)
         self.assertIsNotNone(plan)
         self.assertEqual(plan.strategy, UploadStrategy.XCRUN_ALTOOL)
+
+    def test_altool_strategy_passes_api_key_path(self):
+        """xcrun altool command includes --apiKeyPath when .p8 file exists."""
+        from boss.ios_delivery.state import IOSDeliveryRun, UploadMethod, new_run_id
+        from boss.ios_delivery.toolchain import IOSToolchain, ToolInfo
+        from boss.ios_delivery.upload import UploadStrategy, resolve_upload_plan
+
+        # Create actual .p8 file so the path check passes
+        key_dir = self._td_path / "keys"
+        key_dir.mkdir()
+        p8 = key_dir / "AuthKey_K1.p8"
+        p8.write_bytes(b"fake-key")
+
+        self._write_signing_config({
+            "api_key": {"key_id": "K1", "issuer_id": "I1", "key_path": str(p8)},
+        })
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path="/tmp")
+        run.ipa_path = "/build/App.ipa"
+
+        mock_toolchain = IOSToolchain(
+            xcodebuild=ToolInfo("xcodebuild", True),
+            xcrun=ToolInfo("xcrun", True),
+            fastlane=ToolInfo("fastlane", False),
+            security=ToolInfo("security", True),
+        )
+        with patch("boss.ios_delivery.toolchain.get_toolchain", return_value=mock_toolchain):
+            plan = resolve_upload_plan(run)
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.strategy, UploadStrategy.XCRUN_ALTOOL)
+        self.assertIn("--apiKeyPath", plan.command)
+        idx = plan.command.index("--apiKeyPath")
+        self.assertEqual(plan.command[idx + 1], str(key_dir))
+
+    def test_altool_strategy_no_key_path_when_file_missing(self):
+        """xcrun altool command omits --apiKeyPath when .p8 file doesn't exist."""
+        from boss.ios_delivery.state import IOSDeliveryRun, new_run_id
+        from boss.ios_delivery.toolchain import IOSToolchain, ToolInfo
+        from boss.ios_delivery.upload import resolve_upload_plan
+
+        self._write_signing_config({
+            "api_key": {"key_id": "K1", "issuer_id": "I1", "key_path": "/nonexistent/k.p8"},
+        })
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path="/tmp")
+        run.ipa_path = "/build/App.ipa"
+
+        mock_toolchain = IOSToolchain(
+            xcodebuild=ToolInfo("xcodebuild", True),
+            xcrun=ToolInfo("xcrun", True),
+            fastlane=ToolInfo("fastlane", False),
+            security=ToolInfo("security", True),
+        )
+        with patch("boss.ios_delivery.toolchain.get_toolchain", return_value=mock_toolchain):
+            plan = resolve_upload_plan(run)
+        self.assertIsNotNone(plan)
+        self.assertNotIn("--apiKeyPath", plan.command)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -2409,7 +2487,7 @@ class TestUploadIntegrityFixes(unittest.TestCase):
     # ── Fix 1: Runner governance ──────────────────────────────────
 
     def test_upload_endpoint_establishes_runner_context(self):
-        """POST /upload must call get_runner before upload_artifact."""
+        """POST /upload must call get_runner(mode='deploy') before upload_artifact."""
         import ast
         src = Path(__file__).resolve().parent.parent / "boss" / "api.py"
         tree = ast.parse(src.read_text())
@@ -2432,9 +2510,19 @@ class TestUploadIntegrityFixes(unittest.TestCase):
         ri = calls.index("get_runner")
         ui = calls.index("upload_artifact")
         self.assertLess(ri, ui, "get_runner must be called before upload_artifact")
+        # Verify deploy mode is used (not agent)
+        src_text = src.read_text()
+        # Find the function source
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name == "ios_delivery_start_upload":
+                    func_src = ast.get_source_segment(src_text, node) or ""
+                    self.assertIn('mode="deploy"', func_src,
+                                  "upload endpoint must use deploy mode, not agent")
+                    break
 
     def test_upload_status_endpoint_establishes_runner_context(self):
-        """GET /upload-status must call get_runner before check_processing_status."""
+        """GET /upload-status must call get_runner(mode='deploy') before check_processing_status."""
         import ast
         src = Path(__file__).resolve().parent.parent / "boss" / "api.py"
         tree = ast.parse(src.read_text())
@@ -2456,6 +2544,15 @@ class TestUploadIntegrityFixes(unittest.TestCase):
         ri = calls.index("get_runner")
         ci = calls.index("check_processing_status")
         self.assertLess(ri, ci, "get_runner must be called before check_processing_status")
+        # Verify deploy mode
+        src_text = src.read_text()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name == "ios_delivery_upload_status":
+                    func_src = ast.get_source_segment(src_text, node) or ""
+                    self.assertIn('mode="deploy"', func_src,
+                                  "upload-status endpoint must use deploy mode")
+                    break
 
     # ── Fix 2: Status persistence ─────────────────────────────────
 
@@ -2486,6 +2583,8 @@ class TestUploadIntegrityFixes(unittest.TestCase):
         self.assertEqual(run.upload_status, UploadStatus.READY.value)
         self.assertEqual(run.phase, DeliveryPhase.COMPLETED.value)
         self.assertIsNotNone(run.upload_finished_at)
+        self.assertIsInstance(run.upload_finished_at, float,
+                             "upload_finished_at must be a float (epoch), not a string")
 
         # Verify it was persisted to disk
         from boss.ios_delivery.state import load_run
@@ -2493,6 +2592,8 @@ class TestUploadIntegrityFixes(unittest.TestCase):
         self.assertIsNotNone(reloaded)
         self.assertEqual(reloaded.upload_status, UploadStatus.READY.value)
         self.assertEqual(reloaded.phase, DeliveryPhase.COMPLETED.value)
+        self.assertIsInstance(reloaded.upload_finished_at, float,
+                             "persisted upload_finished_at must survive as float")
 
     def test_no_change_does_not_save(self):
         """check_processing_status does not save when status unchanged."""
