@@ -74,7 +74,7 @@ def detect_capabilities() -> ComputerCapabilities:
     try:
         from boss.config import settings
         # GPT-5.4 supports computer-use; check for an API key
-        caps.computer_use_model = settings.code_model
+        caps.computer_use_model = settings.computer_use_model
         caps.computer_use_model_ready = bool(settings.cloud_api_key)
         if not caps.computer_use_model_ready:
             caps.details["model"] = "no OPENAI_API_KEY configured"

@@ -122,7 +122,7 @@ def create_session(
         target_url=target_url,
         target_domain=_extract_domain(target_url),
         project_path=project_path,
-        active_model=model or settings.code_model,
+        active_model=model or settings.computer_use_model,
         metadata=metadata or {},
     )
     session.metadata["headless"] = headless
@@ -314,6 +314,14 @@ def run_session(session: ComputerSession, *, max_turns: int = 50) -> ComputerSes
             if session.is_terminal or session.is_paused:
                 break
             session = execute_turn(session, harness)
+
+        # If the loop finished without reaching a terminal/paused state,
+        # the turn budget was exhausted.
+        if not session.is_terminal and not session.is_paused:
+            session.status = SessionStatus.FAILED
+            session.error = f"Turn budget exhausted ({max_turns} turns)"
+            save_session(session)
+            append_event(session.session_id, "budget_exhausted", {"max_turns": max_turns})
     finally:
         harness.close()
         session.browser_status = BrowserStatus.CLOSED
@@ -374,18 +382,18 @@ def _parse_model_response(
 ) -> tuple[list[ComputerAction], str | None, str | None]:
     """Parse the model response into actions and/or a final answer.
 
-    Expected response shape (from OpenAI Responses API with computer-use)::
+    GA computer-use shape (batched actions per call)::
 
         {
             "id": "resp_...",
             "output": [
                 {
                     "type": "computer_call",
-                    "action": {
-                        "type": "click",
-                        "x": 100,
-                        "y": 200
-                    }
+                    "call_id": "call_...",
+                    "actions": [
+                        {"type": "click", "x": 100, "y": 200},
+                        {"type": "type", "text": "hello"}
+                    ]
                 },
                 ...
             ]
@@ -402,6 +410,9 @@ def _parse_model_response(
                 }
             ]
         }
+
+    Also accepts the legacy single-action shape (``"action": {...}``) for
+    backward compatibility.
     """
     response_id = response.get("id")
     output_items = response.get("output", [])
@@ -413,9 +424,17 @@ def _parse_model_response(
         item_type = item.get("type", "")
 
         if item_type == "computer_call":
-            action_data = item.get("action", {})
-            if action_data:
-                actions.append(ComputerAction.from_dict(action_data))
+            # GA shape: batched actions[]
+            actions_list = item.get("actions", [])
+            for action_data in actions_list:
+                if action_data:
+                    actions.append(ComputerAction.from_dict(action_data))
+
+            # Legacy shape: single action{}
+            if not actions_list:
+                action_data = item.get("action", {})
+                if action_data:
+                    actions.append(ComputerAction.from_dict(action_data))
 
         elif item_type == "message":
             # Extract text content

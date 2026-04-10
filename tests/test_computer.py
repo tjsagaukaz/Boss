@@ -427,7 +427,7 @@ class CapabilityDetectionTests(unittest.TestCase):
 class ModelResponseParsingTests(unittest.TestCase):
     """Test _parse_model_response."""
 
-    def test_parse_computer_call(self):
+    def test_parse_ga_batched_actions(self):
         from boss.computer.engine import _parse_model_response
 
         response = {
@@ -435,11 +435,11 @@ class ModelResponseParsingTests(unittest.TestCase):
             "output": [
                 {
                     "type": "computer_call",
-                    "action": {"type": "click", "x": 100, "y": 200},
-                },
-                {
-                    "type": "computer_call",
-                    "action": {"type": "type", "text": "hello"},
+                    "call_id": "call_1",
+                    "actions": [
+                        {"type": "click", "x": 100, "y": 200},
+                        {"type": "type", "text": "hello"},
+                    ],
                 },
             ],
         }
@@ -451,6 +451,37 @@ class ModelResponseParsingTests(unittest.TestCase):
         self.assertEqual(actions[1].text, "hello")
         self.assertIsNone(answer)
         self.assertEqual(resp_id, "resp_123")
+
+    def test_parse_legacy_single_action(self):
+        """Legacy single-action shape still accepted."""
+        from boss.computer.engine import _parse_model_response
+
+        response = {
+            "id": "resp_legacy",
+            "output": [
+                {
+                    "type": "computer_call",
+                    "action": {"type": "click", "x": 50, "y": 60},
+                },
+            ],
+        }
+        actions, answer, resp_id = _parse_model_response(response)
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0].type, "click")
+
+    def test_parse_multiple_computer_calls(self):
+        """Multiple computer_call items each with batched actions."""
+        from boss.computer.engine import _parse_model_response
+
+        response = {
+            "id": "resp_multi",
+            "output": [
+                {"type": "computer_call", "actions": [{"type": "click", "x": 1, "y": 2}]},
+                {"type": "computer_call", "actions": [{"type": "type", "text": "abc"}]},
+            ],
+        }
+        actions, answer, resp_id = _parse_model_response(response)
+        self.assertEqual(len(actions), 2)
 
     def test_parse_final_answer(self):
         from boss.computer.engine import _parse_model_response
@@ -483,7 +514,7 @@ class ModelResponseParsingTests(unittest.TestCase):
         response = {
             "id": "resp_789",
             "output": [
-                {"type": "computer_call", "action": {"type": "click", "x": 10, "y": 20}},
+                {"type": "computer_call", "actions": [{"type": "click", "x": 10, "y": 20}]},
                 {"type": "message", "content": [{"type": "output_text", "text": "All done"}]},
             ],
         }
@@ -516,6 +547,58 @@ class CancellationTests(unittest.TestCase):
         self.assertTrue(is_paused("test_pause_1"))
         resume_session("test_pause_1")
         self.assertFalse(is_paused("test_pause_1"))
+
+
+# ---------------------------------------------------------------------------
+# Engine — budget exhaustion
+# ---------------------------------------------------------------------------
+
+
+class BudgetExhaustionTests(unittest.TestCase):
+    """Turn budget exhaustion must land in a terminal state."""
+
+    def test_budget_exhaustion_sets_failed(self):
+        """After max_turns without terminal/pause, session must be FAILED."""
+        from boss.computer.state import ComputerSession, SessionStatus, BrowserStatus
+
+        # Build a session that looks like it just ran through a loop
+        s = ComputerSession(
+            target_url="https://example.com",
+            status=SessionStatus.RUNNING,
+            turn_index=50,
+        )
+        # Simulate: the loop finished all turns but never hit terminal/paused
+        # The engine should set FAILED + error message
+        self.assertFalse(s.is_terminal)
+        self.assertFalse(s.is_paused)
+
+        # Directly test the state transition the engine performs
+        s.status = SessionStatus.FAILED
+        s.error = "Turn budget exhausted (50 turns)"
+        self.assertTrue(s.is_terminal)
+        self.assertIn("budget", s.error.lower())
+
+    def test_run_session_budget_exhaustion(self):
+        """run_session with max_turns=0 should immediately exhaust budget."""
+        from boss.computer.engine import run_session
+        from boss.computer.state import ComputerSession, SessionStatus
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("boss.computer.state._sessions_dir", return_value=Path(tmp)), \
+                 patch("boss.computer.state._events_dir", return_value=Path(tmp)), \
+                 patch("boss.computer.state._screenshots_dir", return_value=Path(tmp)), \
+                 patch("boss.computer.browser.BrowserHarness.launch"), \
+                 patch("boss.computer.browser.BrowserHarness.close"), \
+                 patch("boss.computer.browser.BrowserHarness.navigate") as mock_nav:
+                mock_nav.return_value = MagicMock(success=True)
+
+                s = ComputerSession(target_url="https://example.com")
+                # max_turns=0 means the loop body never runs
+                # but our max() clamp in config ensures >=1, so test with 0 directly
+                result = run_session(s, max_turns=0)
+                self.assertEqual(result.status, SessionStatus.FAILED)
+                self.assertIn("budget", result.error.lower())
+                self.assertTrue(result.is_terminal)
 
 
 # ---------------------------------------------------------------------------
@@ -608,6 +691,30 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(s.computer_use_model, "gpt-5.4")
         self.assertEqual(s.computer_use_max_turns, 50)
         self.assertTrue(s.computer_use_headless)
+
+    def test_session_uses_computer_use_model(self):
+        """create_session must default to computer_use_model, not code_model."""
+        from boss.computer.engine import create_session
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("boss.computer.state._sessions_dir", return_value=Path(tmp)), \
+                 patch("boss.computer.state._events_dir", return_value=Path(tmp)), \
+                 patch("boss.config.settings") as mock_settings:
+                mock_settings.computer_use_model = "correct-model"
+                mock_settings.code_model = "wrong-model"
+                s = create_session(target_url="http://x.com")
+                self.assertEqual(s.active_model, "correct-model")
+
+    def test_capabilities_use_computer_use_model(self):
+        """detect_capabilities must report computer_use_model, not code_model."""
+        from boss.computer.capabilities import detect_capabilities
+
+        with patch("boss.config.settings") as mock_settings:
+            mock_settings.computer_use_model = "correct-model"
+            mock_settings.code_model = "wrong-model"
+            mock_settings.cloud_api_key = "sk-test"
+            caps = detect_capabilities()
+            self.assertEqual(caps.computer_use_model, "correct-model")
 
 
 # ---------------------------------------------------------------------------
