@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from boss.execution import AUTO_ALLOWED_EXECUTION_TYPES, ExecutionType, get_tool_metadata
-from boss.runner.engine import RunnerEngine, get_runner
+from boss.runner.engine import RunnerEngine, current_runner, get_runner
 from boss.runner.policy import (
     CommandVerdict,
     ExecutionPolicy,
@@ -93,58 +93,152 @@ class ActionToolModeFilteringTests(unittest.TestCase):
 
 
 class WriteFileExecutionTests(unittest.TestCase):
-    """Test write_file behavior with real filesystem operations."""
+    """Test write_file through the FunctionTool invoke path."""
 
-    def test_write_creates_new_file(self):
+    def _invoke(self, args: dict) -> str:
+        """Invoke write_file through the FunctionTool.on_invoke_tool path."""
+        import asyncio
+        import json
+        from agents.tool import ToolContext
+        from boss.tools.action import write_file as wf_tool
+
+        args_json = json.dumps(args)
+        ctx = ToolContext(
+            context=None,
+            tool_name="write_file",
+            tool_call_id="test",
+            tool_arguments=args_json,
+        )
+        return asyncio.run(wf_tool.on_invoke_tool(ctx, args_json))
+
+    def test_write_creates_file_through_tool(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = os.path.join(tmp, "new.txt")
-            # Import the raw function (unwrapped)
-            from boss.tools.action import write_file as wf_tool
+            # Install a runner whose writable roots include tmp
+            from boss.runner.engine import _current_runner_var
+            from boss.runner.policy import runner_config_for_mode
 
-            # We need to call the underlying function, not the tool wrapper.
-            # The tool wrapper needs RunContext. Test the logic directly.
-            p = Path(target)
-            self.assertFalse(p.exists())
+            policy = runner_config_for_mode("agent", tmp)
+            runner = RunnerEngine(policy)
+            _current_runner_var.set(runner)
+            try:
+                result = self._invoke({"path": target, "content": "hello\n"})
+                self.assertIn("Created", result)
+                self.assertTrue(Path(target).exists())
+                self.assertEqual(Path(target).read_text(), "hello\n")
+            finally:
+                _current_runner_var.set(None)
 
-            p.write_text("hello\n", encoding="utf-8")
-            self.assertTrue(p.exists())
-            self.assertEqual(p.read_text(), "hello\n")
+    def test_write_denied_outside_writable_roots(self):
+        """PathPolicy should deny writes outside writable roots via the tool."""
+        with tempfile.TemporaryDirectory() as tmp:
+            from boss.runner.engine import _current_runner_var
 
-    def test_write_refuses_outside_writable_roots(self):
-        """PathPolicy should deny writes outside writable roots."""
-        policy = PathPolicy(
-            writable_roots=(Path("/tmp/allowed"),),
-            workspace_root=Path("/tmp/allowed"),
-        )
-        self.assertFalse(policy.is_write_allowed(Path("/etc/passwd")))
-        self.assertTrue(policy.is_write_allowed(Path("/tmp/allowed/file.txt")))
+            policy = ExecutionPolicy(
+                profile=PermissionProfile.WORKSPACE_WRITE,
+                path_policy=PathPolicy(
+                    writable_roots=(Path(tmp),),
+                    workspace_root=Path(tmp),
+                ),
+                network=NetworkPolicy.DISABLED,
+                domain_allowlist=(),
+                allowed_prefixes=(),
+                prompt_prefixes=(),
+                denied_prefixes=(),
+                allow_shell=True,
+                env_scrub_keys=(),
+            )
+            runner = RunnerEngine(policy)
+            _current_runner_var.set(runner)
+            try:
+                result = self._invoke({"path": "/etc/shadow", "content": "nope"})
+                self.assertIn("denied", result.lower())
+                self.assertNotIn("requires approval", result.lower())
+            finally:
+                _current_runner_var.set(None)
 
 
 class EditFileLogicTests(unittest.TestCase):
-    """Test edit_file string replacement logic directly."""
+    """Test edit_file through the FunctionTool invoke path."""
 
-    def test_single_occurrence_replacement(self):
+    def _invoke(self, args: dict) -> str:
+        import asyncio
+        import json
+        from agents.tool import ToolContext
+        from boss.tools.action import edit_file as ef_tool
+
+        args_json = json.dumps(args)
+        ctx = ToolContext(
+            context=None,
+            tool_name="edit_file",
+            tool_call_id="test",
+            tool_arguments=args_json,
+        )
+        return asyncio.run(ef_tool.on_invoke_tool(ctx, args_json))
+
+    def test_single_occurrence_replacement_through_tool(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "code.py"
             target.write_text("def hello():\n    return 1\n", encoding="utf-8")
 
-            original = target.read_text()
-            count = original.count("return 1")
-            self.assertEqual(count, 1)
+            from boss.runner.engine import _current_runner_var
+            from boss.runner.policy import runner_config_for_mode
 
-            updated = original.replace("return 1", "return 42", 1)
-            target.write_text(updated, encoding="utf-8")
-            self.assertIn("return 42", target.read_text())
+            policy = runner_config_for_mode("agent", tmp)
+            runner = RunnerEngine(policy)
+            _current_runner_var.set(runner)
+            try:
+                result = self._invoke({
+                    "path": str(target),
+                    "old_string": "return 1",
+                    "new_string": "return 42",
+                })
+                self.assertIn("Edited", result)
+                self.assertIn("return 42", target.read_text())
+            finally:
+                _current_runner_var.set(None)
 
-    def test_multiple_occurrences_rejected(self):
-        content = "x = 1\nx = 1\nx = 1\n"
-        count = content.count("x = 1")
-        self.assertGreater(count, 1)  # Should reject
+    def test_multiple_occurrences_rejected_through_tool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "dup.py"
+            target.write_text("x = 1\nx = 1\nx = 1\n", encoding="utf-8")
 
-    def test_zero_occurrences_rejected(self):
-        content = "def hello():\n    pass\n"
-        count = content.count("nonexistent string")
-        self.assertEqual(count, 0)  # Should reject
+            from boss.runner.engine import _current_runner_var
+            from boss.runner.policy import runner_config_for_mode
+
+            policy = runner_config_for_mode("agent", tmp)
+            runner = RunnerEngine(policy)
+            _current_runner_var.set(runner)
+            try:
+                result = self._invoke({
+                    "path": str(target),
+                    "old_string": "x = 1",
+                    "new_string": "x = 2",
+                })
+                self.assertIn("appears", result.lower())
+            finally:
+                _current_runner_var.set(None)
+
+    def test_zero_occurrences_rejected_through_tool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "clean.py"
+            target.write_text("def hello():\n    pass\n", encoding="utf-8")
+
+            from boss.runner.engine import _current_runner_var
+            from boss.runner.policy import runner_config_for_mode
+
+            policy = runner_config_for_mode("agent", tmp)
+            runner = RunnerEngine(policy)
+            _current_runner_var.set(runner)
+            try:
+                result = self._invoke({
+                    "path": str(target),
+                    "old_string": "nonexistent string",
+                    "new_string": "replacement",
+                })
+                self.assertIn("not found", result.lower())
+            finally:
+                _current_runner_var.set(None)
 
 
 class RunShellPolicyTests(unittest.TestCase):
@@ -269,6 +363,153 @@ class ScopeKeyTests(unittest.TestCase):
         meta = get_tool_metadata("run_shell")
         label = meta.scope_label({"command": "python3 -m pytest"})
         self.assertIn("python3", label)
+
+
+class RunnerTokenLeakTests(unittest.TestCase):
+    """Verify _get_runner does not leak a runner into the caller context."""
+
+    def test_get_runner_does_not_install_into_context_var(self):
+        """When no runner exists, _get_runner must not install one in the context var."""
+        from boss.runner.engine import _current_runner_var
+        from boss.tools.action import _get_runner
+
+        _current_runner_var.set(None)
+        runner = _get_runner()
+        self.assertIsNotNone(runner, "_get_runner should return a valid runner")
+        self.assertIsNone(
+            current_runner(),
+            "_get_runner created a fallback but leaked it into the context var",
+        )
+
+    def test_get_runner_returns_existing_runner_without_replacement(self):
+        """When a runner exists, _get_runner should return it unchanged."""
+        from boss.runner.engine import _current_runner_var
+        from boss.tools.action import _get_runner
+
+        existing = RunnerEngine(
+            ExecutionPolicy(
+                profile=PermissionProfile.READ_ONLY,
+                path_policy=PathPolicy(writable_roots=(), workspace_root=None),
+                network=NetworkPolicy.DISABLED,
+                domain_allowlist=(),
+                allowed_prefixes=(),
+                prompt_prefixes=(),
+                denied_prefixes=(),
+                allow_shell=False,
+                env_scrub_keys=(),
+            )
+        )
+        _current_runner_var.set(existing)
+        try:
+            runner = _get_runner()
+            self.assertIs(runner, existing)
+        finally:
+            _current_runner_var.set(None)
+
+
+class RunShellIntegrationTests(unittest.TestCase):
+    """Test run_shell through the actual FunctionTool invoke path."""
+
+    def _invoke(self, args: dict) -> str:
+        import asyncio
+        import json
+        from agents.tool import ToolContext
+        from boss.tools.action import run_shell as rs_tool
+
+        args_json = json.dumps(args)
+        ctx = ToolContext(
+            context=None,
+            tool_name="run_shell",
+            tool_call_id="test",
+            tool_arguments=args_json,
+        )
+        return asyncio.run(rs_tool.on_invoke_tool(ctx, args_json))
+
+    def test_allowed_command_executes_through_tool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from boss.runner.engine import _current_runner_var
+
+            policy = ExecutionPolicy(
+                profile=PermissionProfile.WORKSPACE_WRITE,
+                path_policy=PathPolicy(
+                    writable_roots=(Path(tmp),),
+                    workspace_root=Path(tmp),
+                ),
+                network=NetworkPolicy.DISABLED,
+                domain_allowlist=(),
+                allowed_prefixes=("echo",),
+                prompt_prefixes=(),
+                denied_prefixes=(),
+                allow_shell=True,
+                env_scrub_keys=(),
+            )
+            runner = RunnerEngine(policy)
+            _current_runner_var.set(runner)
+            try:
+                result = self._invoke({"command": "echo hello", "cwd": tmp})
+                self.assertIn("hello", result)
+                self.assertIn("exit code 0", result)
+            finally:
+                _current_runner_var.set(None)
+
+    def test_prompt_verdict_becomes_denial_through_tool(self):
+        """Commands that trigger PROMPT should be denied, not left in limbo."""
+        with tempfile.TemporaryDirectory() as tmp:
+            from boss.runner.engine import _current_runner_var
+
+            policy = ExecutionPolicy(
+                profile=PermissionProfile.WORKSPACE_WRITE,
+                path_policy=PathPolicy(
+                    writable_roots=(Path(tmp),),
+                    workspace_root=Path(tmp),
+                ),
+                network=NetworkPolicy.DISABLED,
+                domain_allowlist=(),
+                allowed_prefixes=("echo",),
+                prompt_prefixes=(),
+                denied_prefixes=(),
+                allow_shell=True,
+                env_scrub_keys=(),
+            )
+            runner = RunnerEngine(policy)
+            _current_runner_var.set(runner)
+            try:
+                # 'docker' is not in allowed_prefixes → PROMPT
+                result = self._invoke({"command": "docker build .", "cwd": tmp})
+                self.assertIn("denied", result.lower())
+                # Must not pretend it's a live approval — it's a hard stop
+                self.assertTrue(
+                    result.startswith("Command denied"),
+                    f"PROMPT should be surfaced as a denial, got: {result}",
+                )
+            finally:
+                _current_runner_var.set(None)
+
+    def test_denied_command_blocked_through_tool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from boss.runner.engine import _current_runner_var
+
+            policy = ExecutionPolicy(
+                profile=PermissionProfile.WORKSPACE_WRITE,
+                path_policy=PathPolicy(
+                    writable_roots=(Path(tmp),),
+                    workspace_root=Path(tmp),
+                ),
+                network=NetworkPolicy.DISABLED,
+                domain_allowlist=(),
+                allowed_prefixes=("echo",),
+                prompt_prefixes=(),
+                denied_prefixes=("sudo",),
+                allow_shell=True,
+                env_scrub_keys=(),
+            )
+            runner = RunnerEngine(policy)
+            _current_runner_var.set(runner)
+            try:
+                result = self._invoke({"command": "sudo rm -rf /", "cwd": tmp})
+                self.assertIn("denied", result.lower())
+            finally:
+                _current_runner_var.set(None)
 
 
 if __name__ == "__main__":

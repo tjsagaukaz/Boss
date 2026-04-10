@@ -11,15 +11,25 @@ from pathlib import Path
 
 from boss.control import is_path_allowed_for_agent
 from boss.execution import ExecutionType, display_value, governed_function_tool, scope_value
-from boss.runner.engine import RunnerEngine, current_runner, get_runner
+from boss.runner.engine import RunnerEngine, current_runner
 
 
 def _get_runner() -> RunnerEngine:
-    """Return the current runner or create one for agent mode."""
+    """Return the current runner or create a temporary one for this call.
+
+    Important: when no runner exists in the current context, we build one
+    directly instead of calling ``get_runner()`` — that helper installs its
+    result into the context-var, which would leak a workspace-write runner
+    into the caller's context for the rest of the turn.
+    """
     runner = current_runner()
     if runner is not None:
         return runner
-    return get_runner(mode="agent")
+    # Build a runner without installing it into _current_runner_var.
+    from boss.runner.policy import runner_config_for_mode
+
+    policy = runner_config_for_mode("agent", None)
+    return RunnerEngine(policy)
 
 
 # ── write_file ──────────────────────────────────────────────────────
@@ -47,10 +57,11 @@ def write_file(path: str, content: str, create_dirs: bool = False) -> str:
     from boss.runner.policy import CommandVerdict
 
     verdict = runner.check_write(p)
-    if verdict == CommandVerdict.DENIED:
-        return f"Write denied by policy: {path} is outside writable roots."
-    if verdict == CommandVerdict.PROMPT:
-        return f"Write to {path} requires approval (outside writable roots)."
+    if verdict != CommandVerdict.ALLOWED:
+        # Both DENIED and PROMPT are hard stops here.  The governed
+        # wrapper already handled the tool-level approval; the runner
+        # has no nested approval path, so PROMPT is an honest denial.
+        return f"Write denied by runner policy: {path} is outside writable roots."
 
     if create_dirs:
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -98,10 +109,8 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
     from boss.runner.policy import CommandVerdict
 
     verdict = runner.check_write(p)
-    if verdict == CommandVerdict.DENIED:
-        return f"Edit denied by policy: {path} is outside writable roots."
-    if verdict == CommandVerdict.PROMPT:
-        return f"Edit to {path} requires approval (outside writable roots)."
+    if verdict != CommandVerdict.ALLOWED:
+        return f"Edit denied by runner policy: {path} is outside writable roots."
 
     try:
         original = p.read_text(encoding="utf-8")
@@ -182,10 +191,11 @@ def run_shell(command: str, cwd: str = "", timeout: int = 30) -> str:
 
     from boss.runner.policy import CommandVerdict
 
-    if result.verdict == CommandVerdict.DENIED.value:
-        return f"Command denied: {result.denied_reason or 'blocked by policy'}"
-    if result.verdict == CommandVerdict.PROMPT.value:
-        return f"Command requires approval: {result.denied_reason or 'needs permission'}"
+    if result.verdict != CommandVerdict.ALLOWED.value:
+        # Both DENIED and PROMPT are hard stops.  The governed wrapper
+        # already handled tool-level approval; the runner has no nested
+        # approval path, so PROMPT is treated as a denial.
+        return f"Command denied by runner policy: {result.denied_reason or 'blocked by policy'}"
 
     # Format output
     output = result.output
