@@ -50,8 +50,9 @@ class TestParseModelResponse(unittest.TestCase):
                 }
             ],
         }
-        actions, final, resp_id = self._parse(response)
+        actions, final, resp_id, call_id = self._parse(response)
         self.assertEqual(resp_id, "resp_abc")
+        self.assertEqual(call_id, "call_1")
         self.assertIsNone(final)
         self.assertEqual(len(actions), 2)
         self.assertEqual(actions[0].type, "click")
@@ -69,11 +70,12 @@ class TestParseModelResponse(unittest.TestCase):
                 }
             ],
         }
-        actions, final, resp_id = self._parse(response)
+        actions, final, resp_id, call_id = self._parse(response)
         self.assertEqual(len(actions), 1)
         self.assertEqual(actions[0].type, "click")
         self.assertEqual(actions[0].x, 50)
         self.assertIsNone(final)
+        self.assertIsNone(call_id)
 
     def test_final_answer(self):
         response = {
@@ -87,10 +89,11 @@ class TestParseModelResponse(unittest.TestCase):
                 }
             ],
         }
-        actions, final, resp_id = self._parse(response)
+        actions, final, resp_id, call_id = self._parse(response)
         self.assertEqual(len(actions), 0)
         self.assertEqual(final, "Task completed successfully.")
         self.assertEqual(resp_id, "resp_done")
+        self.assertIsNone(call_id)
 
     def test_mixed_actions_and_message(self):
         response = {
@@ -106,13 +109,13 @@ class TestParseModelResponse(unittest.TestCase):
                 },
             ],
         }
-        actions, final, resp_id = self._parse(response)
+        actions, final, resp_id, call_id = self._parse(response)
         self.assertEqual(len(actions), 1)
         self.assertEqual(final, "Done.")
 
     def test_empty_output(self):
         response = {"id": "resp_empty", "output": []}
-        actions, final, resp_id = self._parse(response)
+        actions, final, resp_id, call_id = self._parse(response)
         self.assertEqual(len(actions), 0)
         self.assertIsNone(final)
 
@@ -122,7 +125,7 @@ class TestParseModelResponse(unittest.TestCase):
                 {"type": "computer_call", "actions": [{"type": "scroll", "scroll_y": -100}]}
             ]
         }
-        actions, final, resp_id = self._parse(response)
+        actions, final, resp_id, call_id = self._parse(response)
         self.assertIsNone(resp_id)
         self.assertEqual(len(actions), 1)
         self.assertEqual(actions[0].type, "scroll")
@@ -950,6 +953,229 @@ class TestHarnessParking(unittest.TestCase):
         mock_harness.close.assert_called_once()
         # Should be removed from registry
         self.assertIsNone(_take_harness("test_cancel_id"))
+
+    def test_deny_closes_parked_harness(self):
+        """Denying an approval should close the parked browser harness."""
+        from boss.computer.engine import (
+            request_approval, resolve_approval, _park_harness, _take_harness,
+        )
+        from boss.computer.state import ComputerAction, ComputerSession, SessionStatus
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with override_settings(app_data_dir=Path(tmp)):
+                session = ComputerSession(
+                    target_url="https://test.com",
+                    target_domain="test.com",
+                    status=SessionStatus.RUNNING,
+                    turn_index=3,
+                )
+                actions = [ComputerAction(type="type", text="secret")]
+                session = request_approval(session, actions, "Type text (6 chars)")
+                approval_id = session.pending_approval_id
+
+                # Simulate a parked harness from run_session
+                mock_harness = MagicMock()
+                _park_harness(session.session_id, mock_harness)
+
+                # Deny the approval
+                session = resolve_approval(session, approval_id, "deny")
+
+                self.assertEqual(session.status, SessionStatus.CANCELLED)
+                # Parked harness must have been closed
+                mock_harness.close.assert_called_once()
+                # Must be removed from the registry
+                self.assertIsNone(_take_harness(session.session_id))
+
+
+class TestContinuationPayload(unittest.TestCase):
+    """Test that continuation turns use computer_call_output, not raw input_image."""
+
+    def test_continuation_sends_computer_call_output(self):
+        """Turn 2+ should send computer_call_output with the call_id from the
+        previous response, not a bare input_image."""
+        from boss.computer.engine import _call_model_async
+        from boss.computer.state import ComputerSession
+        import asyncio
+
+        session = ComputerSession(
+            target_url="https://test.com",
+            target_domain="test.com",
+            active_model="gpt-5.4",
+            turn_index=2,
+            last_model_response_id="resp_prev",
+            last_call_id="call_abc",
+        )
+
+        captured_kwargs = {}
+
+        async def mock_create(**kwargs):
+            captured_kwargs.update(kwargs)
+            resp = MagicMock()
+            resp.id = "resp_cont"
+            resp.output = []
+            return resp
+
+        mock_client = MagicMock()
+        mock_client.responses.create = mock_create
+
+        with patch("boss.models.get_client", return_value=mock_client):
+            asyncio.run(_call_model_async(session, "AAAA"))
+
+        # Should have previous_response_id
+        self.assertEqual(captured_kwargs.get("previous_response_id"), "resp_prev")
+
+        # Input should be a computer_call_output, not a user message
+        input_parts = captured_kwargs.get("input", [])
+        self.assertEqual(len(input_parts), 1)
+        item = input_parts[0]
+        self.assertEqual(item["type"], "computer_call_output")
+        self.assertEqual(item["call_id"], "call_abc")
+        self.assertIn("output", item)
+        self.assertEqual(item["output"]["type"], "input_image")
+
+    def test_continuation_without_call_id_falls_back(self):
+        """If no call_id is tracked (legacy session), fall back to user message."""
+        from boss.computer.engine import _call_model_async
+        from boss.computer.state import ComputerSession
+        import asyncio
+
+        session = ComputerSession(
+            target_url="https://test.com",
+            target_domain="test.com",
+            active_model="gpt-5.4",
+            turn_index=3,
+            last_model_response_id="resp_prev",
+            last_call_id=None,  # No call_id (legacy)
+        )
+
+        captured_kwargs = {}
+
+        async def mock_create(**kwargs):
+            captured_kwargs.update(kwargs)
+            resp = MagicMock()
+            resp.id = "resp_legacy"
+            resp.output = []
+            return resp
+
+        mock_client = MagicMock()
+        mock_client.responses.create = mock_create
+
+        with patch("boss.models.get_client", return_value=mock_client):
+            asyncio.run(_call_model_async(session, "AAAA"))
+
+        input_parts = captured_kwargs.get("input", [])
+        self.assertEqual(len(input_parts), 1)
+        item = input_parts[0]
+        # Should be a regular user message, not computer_call_output
+        self.assertEqual(item["role"], "user")
+
+    def test_parse_extracts_call_id(self):
+        """_parse_model_response should extract the call_id from computer_call items."""
+        from boss.computer.engine import _parse_model_response
+
+        response = {
+            "id": "resp_test",
+            "output": [
+                {
+                    "type": "computer_call",
+                    "call_id": "call_xyz",
+                    "actions": [{"type": "click", "x": 10, "y": 20}],
+                }
+            ],
+        }
+        actions, final, resp_id, call_id = _parse_model_response(response)
+        self.assertEqual(call_id, "call_xyz")
+        self.assertEqual(len(actions), 1)
+
+    def test_call_id_persists_on_session(self):
+        """last_call_id should survive save/load round-trip."""
+        from boss.computer.state import ComputerSession, save_session, load_session
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with override_settings(app_data_dir=Path(tmp)):
+                session = ComputerSession(
+                    target_url="https://test.com",
+                    active_model="gpt-5.4",
+                    last_call_id="call_persist",
+                )
+                save_session(session)
+
+                loaded = load_session(session.session_id)
+                self.assertEqual(loaded.last_call_id, "call_persist")
+
+
+class TestCurrentUrlTracking(unittest.TestCase):
+    """Test that current_url/current_domain are tracked and persisted."""
+
+    def test_sync_current_url_updates_session(self):
+        from boss.computer.engine import _sync_current_url
+        from boss.computer.state import ComputerSession
+
+        session = ComputerSession(
+            target_url="https://example.com",
+            target_domain="example.com",
+        )
+        harness = MagicMock()
+        harness.current_url = "https://other.com/page"
+
+        _sync_current_url(session, harness)
+
+        self.assertEqual(session.current_url, "https://other.com/page")
+        self.assertEqual(session.current_domain, "other.com")
+
+    def test_sync_current_url_noop_when_no_page(self):
+        from boss.computer.engine import _sync_current_url
+        from boss.computer.state import ComputerSession
+
+        session = ComputerSession(
+            target_url="https://example.com",
+            target_domain="example.com",
+        )
+        harness = MagicMock()
+        harness.current_url = None
+
+        _sync_current_url(session, harness)
+
+        self.assertIsNone(session.current_url)
+        self.assertIsNone(session.current_domain)
+
+    def test_current_url_round_trip(self):
+        from boss.computer.state import ComputerSession, save_session, load_session
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with override_settings(app_data_dir=Path(tmp)):
+                session = ComputerSession(
+                    target_url="https://example.com",
+                    target_domain="example.com",
+                    current_url="https://other.com/page",
+                    current_domain="other.com",
+                )
+                save_session(session)
+
+                loaded = load_session(session.session_id)
+                self.assertEqual(loaded.current_url, "https://other.com/page")
+                self.assertEqual(loaded.current_domain, "other.com")
+
+    def test_current_url_defaults_none(self):
+        from boss.computer.state import ComputerSession
+
+        session = ComputerSession(target_url="https://example.com")
+        self.assertIsNone(session.current_url)
+        self.assertIsNone(session.current_domain)
+
+    def test_backward_compat_load_without_current_fields(self):
+        """Sessions saved before current_url existed should load fine."""
+        from boss.computer.state import ComputerSession
+
+        old_dict = {
+            "session_id": "old123",
+            "target_url": "https://example.com",
+            "target_domain": "example.com",
+            "status": "running",
+        }
+        loaded = ComputerSession.from_dict(old_dict)
+        self.assertIsNone(loaded.current_url)
+        self.assertIsNone(loaded.current_domain)
 
 
 if __name__ == "__main__":

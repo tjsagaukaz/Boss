@@ -86,6 +86,11 @@ class BrowserHarness:
     def is_ready(self) -> bool:
         return self._page is not None
 
+    @property
+    def current_url(self) -> str | None:
+        """Return the browser's current URL, or None if no page is open."""
+        return self._page.url if self._page is not None else None
+
     def launch(self) -> None:
         """Start the browser.  Raises PlaywrightMissing or HarnessError."""
         if self._page is not None:

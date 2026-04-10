@@ -53,7 +53,7 @@ struct ContentView: View {
                     HStack {
                         Spacer()
                         ComputerSessionPip(
-                            domain: vm.computerState.session?.targetDomain ?? "session",
+                            domain: vm.computerState.session?.currentDomain ?? vm.computerState.session?.targetDomain ?? "session",
                             status: vm.computerState.session?.status ?? .running,
                             onTap: { vm.selectedSurface = .computer }
                         )

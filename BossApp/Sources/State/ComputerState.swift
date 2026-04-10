@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // MARK: - Computer Session State
@@ -9,8 +10,119 @@ final class ComputerState: ObservableObject {
     @Published var capabilities: ComputerCapabilitiesInfo?
     @Published var refreshError: String?
     @Published var isActive: Bool = false
+    @Published var screenshotImage: NSImage?
+    @Published var actionInFlight: Bool = false
+
+    /// The viewport size (pixels) used by the backend browser.  Must match the
+    /// backend's create-session viewport_width / viewport_height so coordinate
+    /// overlays land correctly on the aspect-fit screenshot.
+    @Published var viewportSize: CGSize = .init(width: 1280, height: 800)
 
     private let api = APIClient.shared
+    private var pollTask: Task<Void, Never>?
+
+    // MARK: - Polling
+
+    func startPolling(sessionId: String) {
+        stopPolling()
+        isActive = true
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.refresh(sessionId: sessionId)
+                try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5s
+            }
+        }
+    }
+
+    func stopPolling() {
+        pollTask?.cancel()
+        pollTask = nil
+    }
+
+    func refresh(sessionId: String) async {
+        do {
+            let dict = try await api.fetchComputerSession(sessionId)
+            let updated = ComputerSessionInfo.from(dict: dict)
+            session = updated
+
+            let eventsData = try await api.fetchComputerEvents(sessionId)
+            events = eventsData.compactMap { ComputerEventInfo.from(dict: $0) }
+
+            // Fetch screenshot
+            if let _ = updated.latestScreenshotPath {
+                do {
+                    let imgData = try await api.fetchComputerScreenshot(sessionId)
+                    if let img = NSImage(data: imgData) {
+                        screenshotImage = img
+                    }
+                } catch {
+                    // Screenshot may not be ready yet — ignore
+                }
+            }
+
+            refreshError = nil
+
+            // Stop polling when terminal
+            if updated.status.isTerminal {
+                stopPolling()
+                isActive = false
+            }
+        } catch {
+            refreshError = error.localizedDescription
+        }
+    }
+
+    // MARK: - Actions
+
+    func approve(decision: String) async {
+        guard let session, let approvalId = session.pendingApprovalId else { return }
+        actionInFlight = true
+        defer { actionInFlight = false }
+        do {
+            let dict = try await api.computerApprove(
+                sessionId: session.sessionId,
+                approvalId: approvalId,
+                decision: decision
+            )
+            self.session = ComputerSessionInfo.from(dict: dict)
+        } catch {
+            refreshError = error.localizedDescription
+        }
+    }
+
+    func pause() async {
+        guard let session, !session.status.isTerminal else { return }
+        actionInFlight = true
+        defer { actionInFlight = false }
+        do {
+            let _ = try await api.computerPause(sessionId: session.sessionId)
+        } catch {
+            refreshError = error.localizedDescription
+        }
+    }
+
+    func resume() async {
+        guard let session else { return }
+        actionInFlight = true
+        defer { actionInFlight = false }
+        do {
+            let dict = try await api.computerResume(sessionId: session.sessionId)
+            self.session = ComputerSessionInfo.from(dict: dict)
+        } catch {
+            refreshError = error.localizedDescription
+        }
+    }
+
+    func cancel() async {
+        guard let session, !session.status.isTerminal else { return }
+        actionInFlight = true
+        defer { actionInFlight = false }
+        do {
+            let _ = try await api.computerCancel(sessionId: session.sessionId)
+        } catch {
+            refreshError = error.localizedDescription
+        }
+    }
 
     // Dummy data for layout testing — replaced when API endpoints ship
     func loadDummy() {
@@ -19,6 +131,8 @@ final class ComputerState: ObservableObject {
             sessionId: "a1b2c3d4e5f6",
             targetUrl: "https://github.com/settings/tokens",
             targetDomain: "github.com",
+            currentUrl: nil,
+            currentDomain: nil,
             status: .running,
             browserStatus: .active,
             activeModel: "gpt-5.4",
@@ -35,7 +149,11 @@ final class ComputerState: ObservableObject {
             ],
             createdAt: now.addingTimeInterval(-45),
             updatedAt: now.addingTimeInterval(-3),
-            error: nil
+            error: nil,
+            approvalPending: false,
+            pendingApprovalId: nil,
+            domainAllowlisted: true,
+            task: "Generate a new personal access token"
         )
         events = [
             ComputerEventInfo(timestamp: now.addingTimeInterval(-45), event: "session_created", detail: "Target: github.com/settings/tokens"),
@@ -65,8 +183,10 @@ final class ComputerState: ObservableObject {
     }
 
     func clearSession() {
+        stopPolling()
         session = nil
         events = []
+        screenshotImage = nil
         isActive = false
     }
 }
@@ -126,6 +246,8 @@ struct ComputerSessionInfo: Identifiable {
     let sessionId: String
     let targetUrl: String?
     let targetDomain: String?
+    let currentUrl: String?
+    let currentDomain: String?
     let status: ComputerSessionStatus
     let browserStatus: ComputerBrowserStatus
     let activeModel: String
@@ -137,6 +259,58 @@ struct ComputerSessionInfo: Identifiable {
     let createdAt: Date
     let updatedAt: Date
     let error: String?
+
+    // Approval fields
+    let approvalPending: Bool
+    let pendingApprovalId: String?
+
+    // Domain safety
+    let domainAllowlisted: Bool
+
+    // Task description
+    let task: String?
+
+    static func from(dict: [String: Any]) -> ComputerSessionInfo {
+        let actions: [ComputerActionInfo] = (dict["last_action_batch"] as? [[String: Any]] ?? []).map { a in
+            ComputerActionInfo(
+                type: a["type"] as? String ?? "unknown",
+                x: a["x"] as? Int,
+                y: a["y"] as? Int,
+                text: a["text"] as? String,
+                key: a["key"] as? String,
+                url: a["url"] as? String
+            )
+        }
+        let results: [ComputerActionResultInfo] = (dict["last_action_results"] as? [[String: Any]] ?? []).map { r in
+            ComputerActionResultInfo(
+                actionType: r["action_type"] as? String ?? "unknown",
+                success: r["success"] as? Bool ?? true,
+                error: r["error"] as? String
+            )
+        }
+        return ComputerSessionInfo(
+            sessionId: dict["session_id"] as? String ?? "",
+            targetUrl: dict["target_url"] as? String,
+            targetDomain: dict["target_domain"] as? String,
+            currentUrl: dict["current_url"] as? String,
+            currentDomain: dict["current_domain"] as? String,
+            status: ComputerSessionStatus(rawValue: dict["status"] as? String ?? "") ?? .created,
+            browserStatus: ComputerBrowserStatus(rawValue: dict["browser_status"] as? String ?? "") ?? .notStarted,
+            activeModel: dict["active_model"] as? String ?? "",
+            turnIndex: dict["turn_index"] as? Int ?? 0,
+            latestScreenshotPath: dict["latest_screenshot_path"] as? String,
+            latestScreenshotTimestamp: (dict["latest_screenshot_ts"] as? Double).map { Date(timeIntervalSince1970: $0) },
+            lastActionBatch: actions,
+            lastActionResults: results,
+            createdAt: Date(timeIntervalSince1970: dict["created_at"] as? Double ?? 0),
+            updatedAt: Date(timeIntervalSince1970: dict["updated_at"] as? Double ?? 0),
+            error: dict["error"] as? String,
+            approvalPending: dict["approval_pending"] as? Bool ?? false,
+            pendingApprovalId: dict["pending_approval_id"] as? String,
+            domainAllowlisted: dict["domain_allowlisted"] as? Bool ?? false,
+            task: dict["task"] as? String
+        )
+    }
 }
 
 struct ComputerActionInfo: Identifiable {
@@ -181,6 +355,40 @@ struct ComputerEventInfo: Identifiable {
     let timestamp: Date
     let event: String
     let detail: String?
+
+    /// Whether this event was triggered by the operator (user) vs the agent.
+    var isOperatorEvent: Bool {
+        switch event {
+        case "approval_granted", "approval_denied", "approval_resumed", "paused", "cancelled":
+            return true
+        default:
+            return false
+        }
+    }
+
+    static func from(dict: [String: Any]) -> ComputerEventInfo? {
+        guard let event = dict["event"] as? String else { return nil }
+        let ts: Date
+        if let t = dict["timestamp"] as? Double {
+            ts = Date(timeIntervalSince1970: t)
+        } else if let t = dict["ts"] as? Double {
+            ts = Date(timeIntervalSince1970: t)
+        } else {
+            ts = Date()
+        }
+        let detail: String?
+        if let d = dict["data"] as? [String: Any] {
+            // Flatten data dict to a readable string
+            let parts = d.compactMap { k, v -> String? in
+                guard let s = v as? String ?? (v as? NSNumber)?.stringValue else { return nil }
+                return "\(k): \(s)"
+            }
+            detail = parts.isEmpty ? nil : parts.joined(separator: ", ")
+        } else {
+            detail = dict["detail"] as? String
+        }
+        return ComputerEventInfo(timestamp: ts, event: event, detail: detail)
+    }
 }
 
 struct ComputerCapabilitiesInfo {

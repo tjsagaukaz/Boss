@@ -230,8 +230,9 @@ def execute_turn(
         return session
 
     # 3. Parse response
-    actions, final_answer, response_id = _parse_model_response(model_response)
+    actions, final_answer, response_id, call_id = _parse_model_response(model_response)
     session.last_model_response_id = response_id
+    session.last_call_id = call_id
 
     if final_answer is not None:
         session.status = SessionStatus.COMPLETED
@@ -270,7 +271,10 @@ def execute_turn(
             "error": last_failure.error,
         })
 
-    # 5. Persist
+    # 5. Sync current browser URL (may have changed during actions)
+    _sync_current_url(session, harness)
+
+    # 6. Persist
     save_session(session)
     append_event(session.session_id, "turn_completed", {
         "turn": turn,
@@ -347,7 +351,7 @@ def run_session(session: ComputerSession, *, max_turns: int = 50) -> ComputerSes
             append_event(session.session_id, "error", {"error": session.error})
             return session
         session.browser_status = BrowserStatus.ACTIVE
-        save_session(session)
+        _sync_current_url(session, harness)
         append_event(session.session_id, "navigated", {"url": session.target_url})
 
     # Turn loop
@@ -465,19 +469,21 @@ async def _call_model_async(session: ComputerSession, screenshot_b64: str) -> di
         )
 
         # Build task prompt — use the explicit task if set, otherwise generic
+        current_domain = session.current_domain or session.target_domain or session.target_url
+        current_url = session.current_url or session.target_url
         if session.task:
             task_text = (
                 f"{safety_preamble}"
                 f"Task: {session.task}\n\n"
-                f"You are browsing {session.target_domain or session.target_url}. "
-                f"Current URL: {session.target_url}"
+                f"You are browsing {current_domain}. "
+                f"Current URL: {current_url}"
             )
         else:
             task_text = (
                 f"{safety_preamble}"
                 f"Navigate and interact with the browser to accomplish the requested task "
-                f"on {session.target_domain or session.target_url}. "
-                f"Current URL: {session.target_url}"
+                f"on {current_domain}. "
+                f"Current URL: {current_url}"
             )
 
         input_parts.append({
@@ -494,16 +500,28 @@ async def _call_model_async(session: ComputerSession, screenshot_b64: str) -> di
             ],
         })
     else:
-        # Continuation turn — just the new screenshot
-        input_parts.append({
-            "role": "user",
-            "content": [
-                {
+        # Continuation turn — send post-action screenshot as computer_call_output
+        # per the GA computer-use protocol.
+        if session.last_call_id:
+            input_parts.append({
+                "type": "computer_call_output",
+                "call_id": session.last_call_id,
+                "output": {
                     "type": "input_image",
                     "image_url": f"data:image/png;base64,{screenshot_b64}",
                 },
-            ],
-        })
+            })
+        else:
+            # Fallback if no call_id tracked (e.g. legacy session)
+            input_parts.append({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:image/png;base64,{screenshot_b64}",
+                    },
+                ],
+            })
 
     # Build tools list — GA computer tool (GPT-5.4)
     tools = [
@@ -533,7 +551,7 @@ async def _call_model_async(session: ComputerSession, screenshot_b64: str) -> di
 
 def _parse_model_response(
     response: dict[str, Any],
-) -> tuple[list[ComputerAction], str | None, str | None]:
+) -> tuple[list[ComputerAction], str | None, str | None, str | None]:
     """Parse the model response into actions and/or a final answer.
 
     GA computer-use shape (batched actions per call)::
@@ -567,17 +585,22 @@ def _parse_model_response(
 
     Also accepts the legacy single-action shape (``"action": {...}``) for
     backward compatibility.
+
+    Returns ``(actions, final_answer, response_id, call_id)``.
     """
     response_id = response.get("id")
     output_items = response.get("output", [])
 
     actions: list[ComputerAction] = []
     final_answer: str | None = None
+    call_id: str | None = None
 
     for item in output_items:
         item_type = item.get("type", "")
 
         if item_type == "computer_call":
+            call_id = item.get("call_id") or call_id
+
             # GA shape: batched actions[]
             actions_list = item.get("actions", [])
             for action_data in actions_list:
@@ -600,7 +623,7 @@ def _parse_model_response(
                         final_answer = text
                         break
 
-    return actions, final_answer, response_id
+    return actions, final_answer, response_id, call_id
 
 
 # ---------------------------------------------------------------------------
@@ -679,6 +702,7 @@ def resume_after_approval(
             "note": "Reusing parked browser — cookies, auth, and page state preserved",
         })
         session.browser_status = BrowserStatus.ACTIVE
+        _sync_current_url(session, harness)
     else:
         # Fallback: create a fresh harness (e.g. server restarted, harness crashed)
         if harness is not None:
@@ -722,6 +746,7 @@ def resume_after_approval(
                 harness.close()
                 return session
             session.browser_status = BrowserStatus.ACTIVE
+        _sync_current_url(session, harness)
 
         append_event(session.session_id, "browser_relaunched", {
             "note": "Parked browser unavailable; new browser created — cookies and page state lost",
@@ -994,6 +1019,8 @@ def resolve_approval(
     elif decision == "deny":
         session.status = SessionStatus.CANCELLED
         session.error = "Action denied by operator"
+        # Close any parked browser so it doesn't leak after denial
+        _close_parked_harness(session.session_id)
         append_event(session.session_id, "approval_denied", {
             "turn": session.turn_index,
             "approval_id": approval_id,
@@ -1045,3 +1072,11 @@ def _extract_domain(url: str) -> str | None:
         return parsed.netloc or None
     except Exception:
         return None
+
+
+def _sync_current_url(session: ComputerSession, harness: BrowserHarness) -> None:
+    """Read the browser's live URL and update the session's current_url/domain."""
+    live = harness.current_url
+    if live and isinstance(live, str):
+        session.current_url = live
+        session.current_domain = _extract_domain(live)

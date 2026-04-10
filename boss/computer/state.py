@@ -153,6 +153,10 @@ class ComputerSession:
     target_domain: str | None = None
     task: str | None = None
 
+    # Live browser location (updated after navigations)
+    current_url: str | None = None
+    current_domain: str | None = None
+
     # Harness
     harness_type: str = HarnessType.BROWSER
     browser_status: str = BrowserStatus.NOT_STARTED
@@ -175,6 +179,7 @@ class ComputerSession:
     last_action_batch: list[dict[str, Any]] = field(default_factory=list)
     last_action_results: list[dict[str, Any]] = field(default_factory=list)
     last_model_response_id: str | None = None
+    last_call_id: str | None = None
 
     # Timestamps
     created_at: float = field(default_factory=time.time)

@@ -172,6 +172,33 @@ def general_tool_hints(tool_names: set[str]) -> str:
             "(read-only in this mode)"
         )
 
+    # Computer use
+    if "start_computer_session" in tool_names:
+        lines.append(
+            "- 'start_computer_session': launch a browser automation session "
+            "targeting a URL (requires approval). Use for tasks that need "
+            "real browser interaction — form filling, multi-step web flows, "
+            "or testing deployed sites. Prefer 'capture_preview' for simple "
+            "screenshots and 'start_preview_server' for local dev servers."
+        )
+        lines.append(
+            "- 'computer_session_status': check progress of a running session "
+            "or view overall computer-use capabilities"
+        )
+        lines.append(
+            "- 'pause_computer_session' / 'resume_computer_session' / "
+            "'stop_computer_session': control a running session"
+        )
+        lines.append(
+            "- 'computer_take_screenshot': retrieve the latest screenshot "
+            "from a session"
+        )
+    elif "computer_session_status" in tool_names:
+        lines.append(
+            "- 'computer_session_status': check computer-use session status "
+            "(read-only in this mode)"
+        )
+
     return "\n".join(lines)
 
 

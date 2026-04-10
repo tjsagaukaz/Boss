@@ -604,6 +604,50 @@ final class APIClient: Sendable {
         return try decode(UploadProcessingInfo.self, from: data, context: "/api/ios-delivery/runs/\(runId)/upload-status")
     }
 
+    // MARK: - Computer-Use
+
+    func fetchComputerSession(_ sessionId: String) async throws -> [String: Any] {
+        let data = try await get("/api/computer/sessions/\(sessionId)")
+        return try decodeJSONObject(from: data, context: "/api/computer/sessions/\(sessionId)")
+    }
+
+    func fetchComputerSessions(limit: Int = 20) async throws -> [[String: Any]] {
+        let data = try await get("/api/computer/sessions", queryItems: [.init(name: "limit", value: "\(limit)")])
+        let arr = try JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        return arr ?? []
+    }
+
+    func fetchComputerEvents(_ sessionId: String) async throws -> [[String: Any]] {
+        let data = try await get("/api/computer/sessions/\(sessionId)/events")
+        let arr = try JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        return arr ?? []
+    }
+
+    func fetchComputerScreenshot(_ sessionId: String) async throws -> Data {
+        try await get("/api/computer/sessions/\(sessionId)/screenshot")
+    }
+
+    func computerApprove(sessionId: String, approvalId: String, decision: String) async throws -> [String: Any] {
+        let body = try JSONSerialization.data(withJSONObject: ["approval_id": approvalId, "decision": decision])
+        let data = try await post("/api/computer/sessions/\(sessionId)/approve", body: body)
+        return try decodeJSONObject(from: data, context: "/api/computer/sessions/\(sessionId)/approve")
+    }
+
+    func computerPause(sessionId: String) async throws -> [String: Any] {
+        let data = try await post("/api/computer/sessions/\(sessionId)/pause", body: nil)
+        return try decodeJSONObject(from: data, context: "/api/computer/sessions/\(sessionId)/pause")
+    }
+
+    func computerCancel(sessionId: String) async throws -> [String: Any] {
+        let data = try await post("/api/computer/sessions/\(sessionId)/cancel", body: nil)
+        return try decodeJSONObject(from: data, context: "/api/computer/sessions/\(sessionId)/cancel")
+    }
+
+    func computerResume(sessionId: String) async throws -> [String: Any] {
+        let data = try await post("/api/computer/sessions/\(sessionId)/start", body: nil)
+        return try decodeJSONObject(from: data, context: "/api/computer/sessions/\(sessionId)/start")
+    }
+
     // MARK: - HTTP helpers
 
     private func get(_ path: String, queryItems: [URLQueryItem] = []) async throws -> Data {

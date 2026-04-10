@@ -3076,7 +3076,14 @@ async def computer_get_session(session_id: str):
     session = load_session(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Computer session not found")
-    return session.to_dict()
+    d = session.to_dict()
+    # Expose whether the target domain is explicitly allowlisted so the
+    # frontend can display an accurate safety indicator.
+    from boss.config import settings as _settings
+    explicit = set(_settings.computer_use_allowed_domains)
+    domain = (session.current_domain or session.target_domain or "").lower()
+    d["domain_allowlisted"] = bool(explicit) and domain in explicit
+    return d
 
 
 @app.get("/api/computer/sessions/{session_id}/events")

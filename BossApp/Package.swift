@@ -14,6 +14,11 @@ let package = Package(
                 .product(name: "HighlightSwift", package: "HighlightSwift"),
             ],
             path: "Sources"
-        )
+        ),
+        .testTarget(
+            name: "BossAppTests",
+            dependencies: ["BossApp"],
+            path: "Tests"
+        ),
     ]
 )

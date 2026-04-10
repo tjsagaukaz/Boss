@@ -62,6 +62,14 @@ from boss.tools.memory import (
     remember,
     search_project_content,
 )
+from boss.tools.computer import (
+    computer_session_status,
+    computer_take_screenshot,
+    pause_computer_session,
+    resume_computer_session,
+    start_computer_session,
+    stop_computer_session,
+)
 from boss.tools.preview import (
     capture_preview,
     preview_status_tool,
@@ -163,6 +171,10 @@ _BOSS_TOOLS = [
     # Preview
     start_preview_server, stop_preview_server,
     capture_preview, preview_status_tool,
+    # Computer use
+    start_computer_session, computer_session_status,
+    pause_computer_session, resume_computer_session,
+    stop_computer_session, computer_take_screenshot,
     # Web search (external) — filtered out when no API key
     web_search,
 ]
