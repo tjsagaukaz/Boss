@@ -2227,6 +2227,15 @@ async def delete_memory_item(source_table: str, item_id: int):
 
 # --- System ---
 
+def _sdk_runtime_diagnostics() -> dict[str, Any]:
+    """Return SDK runtime tool diagnostics for the status endpoint."""
+    try:
+        from boss.sdk_runtime import sdk_runtime_status
+        return sdk_runtime_status()
+    except Exception:
+        return {"error": "sdk_runtime module unavailable"}
+
+
 def _boss_control_health(control: dict[str, Any]) -> dict[str, Any]:
     files = control.get("files") or {}
     required = {
@@ -2372,6 +2381,7 @@ async def system_status():
         "background_jobs_path": str(settings.jobs_dir),
         "background_job_logs_path": str(settings.job_logs_dir),
         "runner": runtime.get("runner"),
+        "sdk_runtime": _sdk_runtime_diagnostics(),
         "cors_allowed_origins": list(settings.cors_allowed_origins),
     }
 

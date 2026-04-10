@@ -2520,6 +2520,7 @@ class TestIntelligenceToolsRegistered(unittest.TestCase):
         tool_names = {tool.name for tool in agent.tools}
         self.assertIn("write_file", tool_names)
         self.assertIn("edit_file", tool_names)
+        self.assertIn("apply_patch", tool_names)
         self.assertIn("run_shell", tool_names)
         self.assertIn("read_file", tool_names)
 

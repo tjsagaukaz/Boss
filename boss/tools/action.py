@@ -1,7 +1,23 @@
-"""Action tools — governed file write, edit, and shell execution for Boss agents.
+"""Action tools — governed file write, edit, patch, and shell execution for Boss agents.
 
 These tools give Boss the ability to modify files and run shell commands,
 all routed through the existing Boss runner/policy system for governance.
+
+Tool surface:
+- ``write_file``: create/overwrite a file (full content).
+- ``edit_file``: exact single-occurrence string replacement.
+- ``apply_patch``: apply a unified diff to one or more files.
+- ``run_shell``: run a shell command through policy enforcement.
+
+When ``sdk_shell_backend`` is enabled in Settings, ``run_shell`` delegates
+to the Boss-adapted SDK ``ShellExecutor`` (``boss.sdk_runtime``) instead of
+calling ``RunnerEngine.run_command`` directly.  The SDK path still routes
+through the same runner policy — it is not an approval bypass.
+
+``apply_patch`` always uses the Boss-native editor
+(``boss.sdk_runtime.BossApplyPatchEditor``) which enforces writable-root
+policy and falls back to a Python implementation when the system ``patch``
+command is unavailable.
 """
 
 from __future__ import annotations
@@ -154,6 +170,10 @@ def run_shell(command: str, cwd: str = "", timeout: int = 30) -> str:
     The command is checked against the active permission profile (allowed
     prefixes, denied prefixes, write boundaries, network policy).
 
+    When the SDK shell backend is enabled (BOSS_SDK_SHELL_BACKEND=true),
+    execution is routed through the Boss-adapted SDK ShellExecutor, which
+    still enforces the same runner policy.
+
     Args:
         command: The shell command to run (e.g. 'python3 -m pytest tests/').
         cwd: Working directory. Defaults to workspace root.
@@ -164,10 +184,17 @@ def run_shell(command: str, cwd: str = "", timeout: int = 30) -> str:
 
     timeout = max(5, min(timeout, 300))
 
+    from boss.config import settings
+
+    if settings.sdk_shell_backend:
+        return _run_shell_sdk(command, cwd, timeout)
+    return _run_shell_native(command, cwd, timeout)
+
+
+def _run_shell_native(command: str, cwd: str, timeout: int) -> str:
+    """Boss-native shell execution through RunnerEngine."""
     runner = _get_runner()
 
-    # Split command for the runner (simple whitespace split; the runner
-    # handles prefix matching on the normalized form).
     import shlex
     try:
         parts = shlex.split(command)
@@ -192,20 +219,119 @@ def run_shell(command: str, cwd: str = "", timeout: int = 30) -> str:
     from boss.runner.policy import CommandVerdict
 
     if result.verdict != CommandVerdict.ALLOWED.value:
-        # Both DENIED and PROMPT are hard stops.  The governed wrapper
-        # already handled tool-level approval; the runner has no nested
-        # approval path, so PROMPT is treated as a denial.
         return f"Command denied by runner policy: {result.denied_reason or 'blocked by policy'}"
 
-    # Format output
-    output = result.output
+    return _format_shell_output(result)
+
+
+def _run_shell_sdk(command: str, cwd: str, timeout: int) -> str:
+    """SDK-backed shell execution via boss_shell_executor."""
+    try:
+        from agents import ShellActionRequest, ShellCallData, ShellCommandRequest
+        from agents import RunContextWrapper
+        from boss.sdk_runtime import boss_shell_executor
+    except ImportError:
+        # SDK not available — fall back to native
+        return _run_shell_native(command, cwd, timeout)
+
+    action = ShellActionRequest(
+        commands=[command],
+        timeout_ms=timeout * 1000,
+    )
+    call_data = ShellCallData(call_id="boss-native", action=action)
+    request = ShellCommandRequest(
+        ctx_wrapper=RunContextWrapper(context=None),
+        data=call_data,
+    )
+
+    try:
+        sdk_result = boss_shell_executor(request)
+    except Exception as exc:
+        return f"SDK shell error: {exc}"
+
+    # Format the SDK result into the same shape as native output
+    if not sdk_result.output:
+        return "[completed] (no output)"
+
+    parts = []
+    for entry in sdk_result.output:
+        exit_code = entry.outcome.exit_code
+        status = f"exit code {exit_code}" if exit_code is not None else "completed"
+        header = f"[{status}]"
+        text = entry.stdout
+        if entry.stderr:
+            text = text + ("\n" if text else "") + entry.stderr
+        if text:
+            parts.append(f"{header}\n{text}")
+        else:
+            parts.append(f"{header} (no output)")
+
+    return "\n".join(parts)
+
+
+def _format_shell_output(result: object) -> str:
+    """Format a RunnerEngine ExecutionResult into a human-readable string."""
+    output = getattr(result, "output", "")
     max_output = 50_000
     if len(output) > max_output:
-        output = output[:max_output] + f"\n... (truncated, {len(result.output)} bytes total)"
+        full_len = len(output)
+        output = output[:max_output] + f"\n... (truncated, {full_len} bytes total)"
 
-    status = f"exit code {result.exit_code}" if result.exit_code is not None else "completed"
-    header = f"[{status}, {result.duration_ms:.0f}ms]"
+    exit_code = getattr(result, "exit_code", None)
+    duration_ms = getattr(result, "duration_ms", 0.0)
+    status = f"exit code {exit_code}" if exit_code is not None else "completed"
+    header = f"[{status}, {duration_ms:.0f}ms]"
 
     if not output:
         return f"{header} (no output)"
     return f"{header}\n{output}"
+
+
+# ── apply_patch ─────────────────────────────────────────────────────
+
+@governed_function_tool(
+    execution_type=ExecutionType.EDIT,
+    title="Apply Patch",
+    describe_call=lambda params: f'Patch {params.get("path", "file")}',
+    scope_key=lambda params: scope_value("fs", f'patch:{params.get("path", "")}'),
+    scope_label=lambda params: f'Patch {display_value(params.get("path"), fallback="file")}',
+)
+def apply_patch(path: str, diff: str) -> str:
+    """Apply a unified diff to a file.
+
+    Use this for multi-line edits where a unified diff is more natural than
+    exact string replacement.  The diff should be in standard unified format
+    (output of ``diff -u`` or ``git diff``).
+
+    For single-site string replacements, prefer ``edit_file``.
+    For creating a new file from scratch, prefer ``write_file``.
+
+    Args:
+        path: Absolute path to the file to patch.
+        diff: The unified diff text to apply.
+    """
+    p = Path(path).expanduser()
+    if not p.is_file():
+        return f"File not found: {path}"
+    if not is_path_allowed_for_agent(p):
+        return f"Access denied: {path}"
+
+    runner = _get_runner()
+    from boss.runner.policy import CommandVerdict
+
+    verdict = runner.check_write(p)
+    if verdict != CommandVerdict.ALLOWED:
+        return f"Patch denied by runner policy: {path} is outside writable roots."
+
+    if not diff.strip():
+        return "Error: empty diff."
+
+    from boss.sdk_runtime import _apply_unified_diff
+    result = _apply_unified_diff(p, diff)
+
+    # result is an ApplyPatchResult dataclass
+    status = getattr(result, "status", "unknown")
+    output = getattr(result, "output", "")
+    if status == "completed":
+        return output or f"Patched {path}"
+    return f"Patch failed: {output or 'unknown error'}"

@@ -108,6 +108,8 @@ class Settings:
     max_concurrent_workers: int = max(1, _env_int("BOSS_MAX_CONCURRENT_WORKERS", 3))
     deploy_enabled: bool = _env_bool("BOSS_DEPLOY_ENABLED", False)
     deploy_history_dir: Path = Path(os.getenv("BOSS_DEPLOY_HISTORY_DIR", app_data_dir / "deploys"))
+    sdk_shell_backend: bool = _env_bool("BOSS_SDK_SHELL_BACKEND", False)
+    sdk_patch_backend: bool = _env_bool("BOSS_SDK_PATCH_BACKEND", False)
     cors_allowed_origins: tuple[str, ...] = tuple(
         o.strip()
         for o in os.getenv(

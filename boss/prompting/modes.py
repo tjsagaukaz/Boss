@@ -123,6 +123,12 @@ def general_tool_hints(tool_names: set[str]) -> str:
     if "write_file" in tool_names:
         lines.append("- 'write_file': create or overwrite a file (requires approval)")
         lines.append("- 'edit_file': targeted string replacement in a file (requires approval)")
+    if "apply_patch" in tool_names:
+        lines.append(
+            "- 'apply_patch': apply a unified diff to a file (requires approval). "
+            "Prefer this for multi-line edits; use 'edit_file' for single-site "
+            "replacements."
+        )
     if "run_shell" in tool_names:
         lines.append("- 'run_shell': run a shell command through policy enforcement (requires approval)")
 

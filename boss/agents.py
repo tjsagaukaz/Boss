@@ -27,7 +27,7 @@ from boss.config import settings
 from boss.control import load_boss_control
 from boss.execution import AUTO_ALLOWED_EXECUTION_TYPES, get_tool_metadata
 from boss.guardrails.safety import safety_check
-from boss.tools.action import edit_file, run_shell, write_file
+from boss.tools.action import apply_patch, edit_file, run_shell, write_file
 from boss.tools.filesystem import grep_codebase, list_directory
 from boss.tools.filesystem import read_file as fs_read_file
 from boss.tools.intelligence import (
@@ -151,7 +151,7 @@ _BOSS_TOOLS = [
     # Filesystem (read)
     fs_read_file, list_directory, grep_codebase,
     # Filesystem (write) — filtered out in read-only modes
-    write_file, edit_file,
+    write_file, edit_file, apply_patch,
     # Shell — filtered out in read-only modes
     run_shell,
     # Code intelligence
