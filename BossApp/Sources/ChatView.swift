@@ -601,12 +601,8 @@ struct MessageView: View {
             }
 
             if !message.executionSteps.isEmpty {
-                VStack(alignment: .leading, spacing: 3) {
-                    ForEach(message.executionSteps) { step in
-                        executionStepView(step)
-                    }
-                }
-                .padding(.bottom, message.content.isEmpty ? 0 : 14)
+                toolStreamContainer
+                    .padding(.bottom, message.content.isEmpty ? 0 : 14)
             }
 
             // Loop progress widget
@@ -661,40 +657,95 @@ struct MessageView: View {
         }
     }
 
+    // MARK: - Tool Stream Container (Invisible Box)
+
+    private var lastStepId: String? { message.executionSteps.last?.id }
+
+    private var toolStreamContainer: some View {
+        ScrollViewReader { proxy in
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(message.executionSteps) { step in
+                        executionStepView(step)
+                            .id(step.id)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            .frame(maxHeight: 140)
+            .mask(
+                LinearGradient(
+                    stops: [
+                        .init(color: .clear, location: 0),
+                        .init(color: .black, location: 0.08),
+                        .init(color: .black, location: 0.92),
+                        .init(color: .clear, location: 1),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+            .onChange(of: message.executionSteps.count) { _, _ in
+                if let id = lastStepId {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        proxy.scrollTo(id, anchor: .bottom)
+                    }
+                }
+            }
+            .onChange(of: message.executionSteps.last?.state) { _, _ in
+                if let id = lastStepId {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        proxy.scrollTo(id, anchor: .bottom)
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - Execution Narrative
 
-    private func executionStepView(_ step: ExecutionStep) -> some View {
-        HStack(spacing: 0) {
-            RoundedRectangle(cornerRadius: 1)
-                .fill(step.state == .failure ? Color.red.opacity(0.5) : Color.white.opacity(0.12))
-                .frame(width: 3)
+    private var isStepActive: Bool {
+        guard let last = message.executionSteps.last else { return false }
+        return last.state == .running || last.state == .pending || last.state == .waitingPermission
+    }
 
-            VStack(alignment: .leading, spacing: 3) {
+    private func executionStepView(_ step: ExecutionStep) -> some View {
+        let isLatest = step.id == message.executionSteps.last?.id
+        let dimmed = !isLatest && (step.state == .success || step.state == .failure)
+
+        return HStack(spacing: 0) {
+            RoundedRectangle(cornerRadius: 1)
+                .fill(step.state == .failure
+                      ? Color.red.opacity(dimmed ? 0.2 : 0.5)
+                      : Color.white.opacity(dimmed ? 0.05 : 0.12))
+                .frame(width: 2)
+
+            VStack(alignment: .leading, spacing: 1) {
                 Text(primaryLine(for: step))
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundColor(step.state == .success ? Typo.tertiaryText : Typo.secondaryText)
-                    .lineLimit(2)
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundColor(dimmed ? Color.white.opacity(0.22) : (step.state == .success ? Typo.tertiaryText : Typo.secondaryText))
+                    .lineLimit(1)
                     .contentTransition(.opacity)
 
                 if let statusLine = secondaryLine(for: step) {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 6) {
                         Text(statusLine)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(Typo.tertiaryText)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(dimmed ? Color.white.opacity(0.15) : Typo.tertiaryText)
                             .lineLimit(1)
                             .contentTransition(.opacity)
 
-                        if step.state == .failure {
+                        if step.state == .failure && isLatest {
                             Button(action: { vm.retryLastMessage() }) {
-                                HStack(spacing: 4) {
+                                HStack(spacing: 3) {
                                     Image(systemName: "arrow.clockwise")
-                                        .font(.system(size: 10, weight: .medium))
+                                        .font(.system(size: 9, weight: .medium))
                                     Text("Retry")
-                                        .font(.system(size: 11, weight: .medium))
+                                        .font(.system(size: 10, weight: .medium))
                                 }
                                 .foregroundColor(Color.white.opacity(0.6))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
                                 .background(
                                     Capsule()
                                         .fill(Color.white.opacity(0.06))
@@ -712,20 +763,20 @@ struct MessageView: View {
                             vm.respondToPermission(messageId: message.id, request: request, decision: decision)
                         }
                     }
-                    .padding(.top, 4)
+                    .padding(.top, 2)
                 }
             }
-            .padding(.leading, 10)
-            .padding(.vertical, 6)
+            .padding(.leading, 8)
+            .padding(.vertical, 4)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 2)
-        .padding(.horizontal, 10)
+        .padding(.vertical, 1)
+        .padding(.horizontal, 8)
         .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(Color.white.opacity(0.03))
+            RoundedRectangle(cornerRadius: 5)
+                .fill(Color.white.opacity(dimmed ? 0.015 : 0.03))
         )
-        .animation(.easeOut(duration: 0.12), value: step.state)
+        .animation(.easeInOut(duration: 0.15), value: step.state)
     }
 
     private func primaryLine(for step: ExecutionStep) -> String {

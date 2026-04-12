@@ -55,6 +55,11 @@ def _start_computer_session_impl(
             logger.exception(
                 "Computer-use session failed: %s", session.session_id
             )
+            from boss.computer.state import SessionStatus, save_session
+            session.status = SessionStatus.FAILED
+            session.error = f"Session crashed: {__import__('traceback').format_exc(limit=3)}"
+            session.touch()
+            save_session(session)
 
     threading.Thread(
         target=ctx.run,

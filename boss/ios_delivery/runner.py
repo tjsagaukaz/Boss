@@ -175,13 +175,18 @@ def _run_governed(
         )
     except subprocess.TimeoutExpired:
         duration_ms = (time.monotonic() - start) * 1000
-        # Kill the entire process group (xcodebuild spawns children)
+        # Graceful shutdown: SIGTERM first, then SIGKILL after grace period
         try:
             pgid = os.getpgid(proc.pid)
-            os.killpg(pgid, signal.SIGKILL)
+            os.killpg(pgid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(pgid, signal.SIGKILL)
+                proc.wait(timeout=5)
         except (OSError, ProcessLookupError):
             proc.kill()
-        proc.wait()
+            proc.wait()
         return BuildResult(
             command=command,
             exit_code=-1,
@@ -230,11 +235,18 @@ def _run_direct(
         )
     except subprocess.TimeoutExpired:
         duration_ms = (time.monotonic() - start) * 1000
+        # Graceful shutdown: SIGTERM first, then SIGKILL after grace period
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(pgid, signal.SIGKILL)
+                proc.wait(timeout=5)
         except (OSError, ProcessLookupError):
             proc.kill()
-        proc.wait()
+            proc.wait()
         return BuildResult(
             command=command,
             exit_code=-1,

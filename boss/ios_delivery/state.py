@@ -133,6 +133,7 @@ class IOSDeliveryRun:
     # ── Pipeline state
     phase: str = DeliveryPhase.PENDING.value
     error: str | None = None
+    retry_count: int = 0
     build_log: str = ""
     export_log: str = ""
     upload_log: str = ""
@@ -286,6 +287,11 @@ def new_run_id() -> str:
 # ── Event log ───────────────────────────────────────────────────────
 
 
+# Maximum event log lines per run.  When exceeded, the oldest events
+# are trimmed to keep the file bounded.
+_MAX_EVENT_LOG_LINES = 2000
+
+
 def append_event(
     run_id: str,
     *,
@@ -304,6 +310,15 @@ def append_event(
     }
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, default=str) + "\n")
+
+    # Rotate if the log has grown too large.
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if len(lines) > _MAX_EVENT_LOG_LINES:
+            keep = lines[-(_MAX_EVENT_LOG_LINES // 2):]
+            path.write_text("\n".join(keep) + "\n", encoding="utf-8")
+    except OSError:
+        pass
 
 
 def read_events(run_id: str) -> list[dict[str, Any]]:

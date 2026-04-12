@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import signal
 import subprocess
 import time
@@ -73,7 +74,6 @@ def start_preview(
         proc, result = runner.start_managed_process(
             cmd_parts,
             cwd=project_path,
-            shell=True,
         )
 
         if proc is None:
@@ -100,8 +100,7 @@ def start_preview(
         # No runner context — keep the existing raw Popen path.
         try:
             proc = subprocess.Popen(
-                resolved_command,
-                shell=True,
+                shlex.split(resolved_command),
                 cwd=project_path,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

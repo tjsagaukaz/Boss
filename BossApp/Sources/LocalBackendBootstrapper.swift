@@ -72,6 +72,7 @@ actor LocalBackendBootstrapper {
         try ensureLogFileExists(at: logFileURL)
 
         let logHandle = try FileHandle(forWritingTo: logFileURL)
+        defer { try? logHandle.close() }
         let logOffset = try logHandle.seekToEnd()
 
         process.executableURL = interpreter
@@ -89,14 +90,7 @@ actor LocalBackendBootstrapper {
         process.standardOutput = logHandle
         process.standardError = logHandle
 
-        do {
-            try process.run()
-        } catch {
-            try? logHandle.close()
-            throw error
-        }
-
-        try? logHandle.close()
+        try process.run()
         return LaunchedBackend(process: process, logFileURL: logFileURL, logOffset: logOffset)
     }
 
@@ -136,12 +130,6 @@ actor LocalBackendBootstrapper {
     }
 
     private func resolveWorkspaceRoot() -> URL? {
-        // Fast path: check the known workspace location first
-        let knownRoot = URL(fileURLWithPath: "/Users/tj/boss")
-        if isWorkspaceRoot(knownRoot) {
-            return knownRoot
-        }
-
         var candidates: [URL] = []
         let env = ProcessInfo.processInfo.environment
         if let configuredRoot = env["BOSS_WORKSPACE_ROOT"], !configuredRoot.isEmpty {
@@ -155,7 +143,10 @@ actor LocalBackendBootstrapper {
         }
 
         candidates.append(contentsOf: ancestorChain(startingAt: Bundle.main.bundleURL))
-        candidates.append(URL(fileURLWithPath: "/Users/tj/boss"))
+
+        // Generic home-relative fallback
+        let homeBoss = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("boss")
+        candidates.append(homeBoss)
 
         var seen: Set<String> = []
         for candidate in candidates {

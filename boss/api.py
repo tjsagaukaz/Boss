@@ -147,10 +147,13 @@ session_context_manager = SessionContextManager()
 background_job_tasks: dict[str, asyncio.Task[Any]] = {}
 
 
+# Maximum allowed message size in characters (roughly 500 KB of UTF-8 text).
+MAX_MESSAGE_LENGTH = 500_000
+
 # --- Request / Response models ---
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(..., max_length=MAX_MESSAGE_LENGTH)
     session_id: str | None = None
     mode: str = "agent"
     project_path: str | None = None

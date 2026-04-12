@@ -91,7 +91,10 @@ final class APIClient: Sendable {
         executionStyle: ExecutionStyle = .singlePass,
         loopBudget: [String: Any]? = nil
     ) -> AsyncStream<SSEEvent> {
-        var req = URLRequest(url: URL(string: "\(baseURL)/api/chat")!)
+        guard let chatURL = URL(string: "\(baseURL)/api/chat") else {
+            return errorStream(.invalidURL("/api/chat"))
+        }
+        var req = URLRequest(url: chatURL)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
@@ -113,7 +116,10 @@ final class APIClient: Sendable {
         approvalId: String,
         decision: PermissionDecision
     ) -> AsyncStream<SSEEvent> {
-        var req = URLRequest(url: URL(string: "\(baseURL)/api/chat/permissions")!)
+        guard let permURL = URL(string: "\(baseURL)/api/chat/permissions") else {
+            return errorStream(.invalidURL("/api/chat/permissions"))
+        }
+        var req = URLRequest(url: permURL)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
@@ -785,6 +791,16 @@ final class APIClient: Sendable {
             return "the top level"
         }
         return codingPath.map(\.stringValue).joined(separator: ".")
+    }
+
+    private func errorStream(_ error: APIError) -> AsyncStream<SSEEvent> {
+        AsyncStream { continuation in
+            var evt = SSEEvent()
+            evt.type = "error"
+            evt.data = ["message": error.userMessage]
+            continuation.yield(evt)
+            continuation.finish()
+        }
     }
 
     private func stream(request: URLRequest) -> AsyncStream<SSEEvent> {

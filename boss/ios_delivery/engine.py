@@ -592,6 +592,29 @@ def upload_artifact(run: IOSDeliveryRun) -> IOSDeliveryRun:
     upload_result = execute_upload(run, plan)
     run.metadata["upload_result"] = upload_result.to_dict()
 
+    # Retry transient upload failures (network timeouts, 5xx, etc.)
+    max_upload_retries = 2
+    upload_attempt = 1
+    while (
+        not upload_result.success
+        and upload_attempt < max_upload_retries
+        and _is_transient_upload_failure(upload_result)
+        and not is_cancelled(run.run_id)
+    ):
+        upload_attempt += 1
+        backoff = min(30 * upload_attempt, 120)
+        append_event(
+            run.run_id,
+            event_type="upload_retry",
+            message=f"Retrying upload (attempt {upload_attempt}/{max_upload_retries + 1}) after {backoff}s backoff",
+        )
+        time.sleep(backoff)
+        if _check_cancelled(run):
+            return run
+        upload_result = execute_upload(run, plan)
+        run.metadata["upload_result"] = upload_result.to_dict()
+        run.metadata["upload_attempts"] = upload_attempt
+
     # Re-check cancellation after subprocess finishes
     if _check_cancelled(run):
         return run
@@ -671,6 +694,9 @@ def run_full_pipeline(run: IOSDeliveryRun) -> IOSDeliveryRun:
     for phase_fn in phases:
         run = phase_fn(run)
         if run.is_terminal:
+            # Record which phase failed so resume knows where to restart.
+            if run.phase == DeliveryPhase.FAILED.value:
+                run.metadata["failed_at_phase"] = phase_fn.__name__
             break
 
     if run.phase not in (
@@ -682,8 +708,7 @@ def run_full_pipeline(run: IOSDeliveryRun) -> IOSDeliveryRun:
         # Pipeline completed all phases without failure — mark done
         run.phase = DeliveryPhase.COMPLETED.value
 
-    import time as _time
-    run.finished_at = _time.time()
+    run.finished_at = time.time()
     save_run(run)
     append_event(
         run.run_id,
@@ -692,6 +717,156 @@ def run_full_pipeline(run: IOSDeliveryRun) -> IOSDeliveryRun:
         payload={"error": run.error},
     )
     return run
+
+
+# ── Phase ordering for resume logic ────────────────────────────────
+
+_PHASE_FUNCTIONS_ORDERED: list[tuple[str, Any]] = [
+    ("inspect_project", None),   # filled after definition
+    ("archive_build", None),
+    ("export_archive", None),
+    ("upload_artifact", None),
+]
+
+
+def _phase_fn_by_name(name: str) -> Any:
+    """Resolve a phase function by its __name__."""
+    return {
+        "inspect_project": inspect_project,
+        "archive_build": archive_build,
+        "export_archive": export_archive,
+        "upload_artifact": upload_artifact,
+    }.get(name)
+
+
+def resume_pipeline(run: IOSDeliveryRun, *, max_retries: int = 2) -> IOSDeliveryRun:
+    """Resume a failed run from the phase that failed.
+
+    Only FAILED runs can be resumed.  Execution restarts at the failed
+    phase and continues through the remaining phases.  ``retry_count``
+    is incremented each time to prevent infinite retry loops.
+
+    Returns the run after all remaining phases have executed (or after
+    another failure/cancellation).
+    """
+    if run.phase != DeliveryPhase.FAILED.value:
+        append_event(
+            run.run_id,
+            event_type="resume_skipped",
+            message=f"Cannot resume: run is in {run.phase}, not failed",
+        )
+        return run
+
+    if run.retry_count >= max_retries:
+        append_event(
+            run.run_id,
+            event_type="resume_exhausted",
+            message=f"Retry limit reached ({run.retry_count}/{max_retries})",
+        )
+        return run
+
+    failed_fn_name = run.metadata.get("failed_at_phase")
+    # Clear the cancelled set in case this run was cancelled then failed.
+    with _cancel_lock:
+        _cancelled_ids.discard(run.run_id)
+
+    run.retry_count += 1
+    run.error = None
+    run.finished_at = None
+    save_run(run)
+
+    append_event(
+        run.run_id,
+        event_type="resume",
+        message=f"Resuming from {failed_fn_name or 'start'} (attempt {run.retry_count})",
+    )
+
+    all_phases = [inspect_project, archive_build, export_archive, upload_artifact]
+
+    # Find the phase to restart from.
+    start_idx = 0
+    if failed_fn_name:
+        for i, fn in enumerate(all_phases):
+            if fn.__name__ == failed_fn_name:
+                start_idx = i
+                break
+
+    for phase_fn in all_phases[start_idx:]:
+        run = phase_fn(run)
+        if run.is_terminal:
+            if run.phase == DeliveryPhase.FAILED.value:
+                run.metadata["failed_at_phase"] = phase_fn.__name__
+            break
+
+    if run.phase not in (
+        DeliveryPhase.COMPLETED.value,
+        DeliveryPhase.FAILED.value,
+        DeliveryPhase.CANCELLED.value,
+        DeliveryPhase.UPLOADING.value,
+    ):
+        run.phase = DeliveryPhase.COMPLETED.value
+
+    run.finished_at = time.time()
+    save_run(run)
+    append_event(
+        run.run_id,
+        event_type="finished",
+        message=f"Resumed pipeline finished: {run.phase}",
+        payload={"error": run.error, "retry_count": run.retry_count},
+    )
+    return run
+
+
+# ── Upload retry heuristic ──────────────────────────────────────────
+
+
+def _is_transient_upload_failure(result: Any) -> bool:
+    """Return True if the upload failure looks transient (worth retrying).
+
+    Transient failures include network timeouts, connection resets,
+    and Apple server 5xx errors.  Permanent failures like authentication
+    errors or policy denials should not be retried.
+    """
+    if result.exit_code is None:
+        # Policy denial — not transient
+        return False
+
+    text = (getattr(result, "error_detail", "") or "").lower()
+    text += " " + (getattr(result, "stderr", "") or "").lower()
+
+    permanent_indicators = [
+        "authentication",
+        "unauthorized",
+        "invalid api key",
+        "no suitable",
+        "invalid ipa",
+        "denied",
+        "forbidden",
+        "provisioning profile",
+    ]
+    for indicator in permanent_indicators:
+        if indicator in text:
+            return False
+
+    transient_indicators = [
+        "timeout",
+        "timed out",
+        "connection reset",
+        "connection refused",
+        "network",
+        "503",
+        "502",
+        "500",
+        "temporarily unavailable",
+        "try again",
+        "could not connect",
+    ]
+    for indicator in transient_indicators:
+        if indicator in text:
+            return True
+
+    # Unknown failure — don't retry by default
+    return False
 
 
 # ── Diagnostics ─────────────────────────────────────────────────────

@@ -42,6 +42,7 @@ from boss.tools.ios import (
     inspect_xcode_project,
     ios_delivery_status,
     list_xcode_schemes,
+    resume_ios_delivery,
     start_ios_delivery,
     summarize_ios_project,
 )
@@ -167,7 +168,7 @@ _BOSS_TOOLS = [
     search_code_semantic, project_graph, find_importers,
     # iOS / Xcode
     inspect_xcode_project, list_xcode_schemes, summarize_ios_project,
-    start_ios_delivery, ios_delivery_status,
+    start_ios_delivery, ios_delivery_status, resume_ios_delivery,
     # Preview
     start_preview_server, stop_preview_server,
     capture_preview, preview_status_tool,

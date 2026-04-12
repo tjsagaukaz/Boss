@@ -231,9 +231,15 @@ def start_ios_delivery(
             run_full_pipeline(run)
         except Exception:
             import logging
+            import traceback
             logging.getLogger("boss.tools.ios").exception(
                 "Pipeline execution failed for run %s", run.run_id
             )
+            from boss.ios_delivery.state import DeliveryPhase, save_run
+            run.phase = DeliveryPhase.FAILED.value
+            run.error = f"Pipeline crashed: {traceback.format_exc(limit=3)}"
+            run.updated_at = __import__('time').time()
+            save_run(run)
 
     threading.Thread(
         target=ctx.run, args=(_run_pipeline,),
@@ -343,3 +349,69 @@ def ios_delivery_status(run_id: str = "") -> str:
             lines.append(f"  [{r['phase']}] {label} — {r['run_id'][:12]}")
 
     return "\n".join(lines)
+
+
+@governed_function_tool(
+    execution_type=ExecutionType.RUN,
+    title="Resume iOS Delivery",
+    describe_call=lambda params: f'Resume failed iOS delivery run {params.get("run_id", "?")}',
+    scope_key=lambda _params: scope_value("ios-delivery", "resume"),
+    scope_label=lambda _params: "Resume failed iOS delivery run",
+)
+def resume_ios_delivery(run_id: str) -> str:
+    """Resume a previously failed iOS delivery pipeline run.
+
+    Restarts execution from the phase that failed.  Each run can be
+    resumed up to 2 times to prevent infinite retry loops.
+
+    Args:
+        run_id: The ID of the failed delivery run to resume.
+    """
+    import contextvars
+    import threading
+
+    from boss.ios_delivery.engine import resume_pipeline
+    from boss.ios_delivery.state import load_run
+    from boss.runner.engine import _current_runner_var, get_runner
+
+    run = load_run(run_id)
+    if run is None:
+        return f"No delivery run found with ID: {run_id}"
+
+    if run.phase != "failed":
+        return f"Run {run_id} is in phase '{run.phase}', not 'failed'. Only failed runs can be resumed."
+
+    if run.retry_count >= 2:
+        return f"Run {run_id} has already been retried {run.retry_count} times. Create a new delivery run instead."
+
+    prev_runner = _current_runner_var.get(None)
+    get_runner(mode="deploy", workspace_root=run.project_path)
+    ctx = contextvars.copy_context()
+    _current_runner_var.set(prev_runner)
+
+    def _run_resume() -> None:
+        try:
+            resume_pipeline(run)
+        except Exception:
+            import logging
+            import traceback
+            logging.getLogger("boss.tools.ios").exception(
+                "Resume execution failed for run %s", run.run_id
+            )
+            from boss.ios_delivery.state import DeliveryPhase, save_run
+            run.phase = DeliveryPhase.FAILED.value
+            run.error = f"Resume crashed: {traceback.format_exc(limit=3)}"
+            run.updated_at = __import__('time').time()
+            save_run(run)
+
+    threading.Thread(
+        target=ctx.run, args=(_run_resume,),
+        daemon=True, name=f"ios-resume-{run.run_id}",
+    ).start()
+
+    failed_phase = run.metadata.get("failed_at_phase", "unknown")
+    return (
+        f"Resuming iOS delivery run {run_id} from {failed_phase} "
+        f"(attempt {run.retry_count + 1}/3).\n"
+        f"Use ios_delivery_status to check progress."
+    )

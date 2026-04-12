@@ -1281,7 +1281,7 @@ class TestGovernedTimeoutKillsGroup(unittest.TestCase):
     """_run_governed timeout path must kill the process group, not just parent."""
 
     def test_timeout_uses_killpg(self):
-        """Verify the timeout path attempts os.killpg before falling back."""
+        """Verify the timeout path attempts os.killpg with SIGTERM first."""
         from boss.ios_delivery.runner import _run_governed
 
         mock_proc = MagicMock()
@@ -1300,7 +1300,8 @@ class TestGovernedTimeoutKillsGroup(unittest.TestCase):
             )
 
         mock_getpgid.assert_called_once_with(12345)
-        mock_killpg.assert_called_once_with(12345, signal.SIGKILL)
+        # Should SIGTERM first for graceful shutdown
+        mock_killpg.assert_called_once_with(12345, signal.SIGTERM)
         self.assertEqual(result.exit_code, -1)
         self.assertIn("timed out", result.stderr)
 
